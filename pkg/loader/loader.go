@@ -6,11 +6,66 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"beads_viewer/pkg/model"
 )
 
-// LoadIssues reads issues from the .beads/issues.jsonl file in the given repository path.
+// FindJSONLPath locates the beads JSONL file in the given directory.
+// Prefers beads.jsonl (canonical) over issues.jsonl (legacy fallback).
+// Skips backup files and merge artifacts.
+func FindJSONLPath(beadsDir string) (string, error) {
+	entries, err := os.ReadDir(beadsDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to read beads directory: %w", err)
+	}
+
+	var candidates []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+
+		// Must be a .jsonl file
+		if !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+
+		// Skip backups, merge artifacts, and deletion manifests
+		if strings.Contains(name, ".backup") ||
+			strings.Contains(name, ".orig") ||
+			strings.Contains(name, ".merge") ||
+			name == "deletions.jsonl" {
+			continue
+		}
+
+		candidates = append(candidates, name)
+	}
+
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no beads JSONL file found in %s", beadsDir)
+	}
+
+	// Prefer beads.jsonl (canonical name)
+	for _, name := range candidates {
+		if name == "beads.jsonl" {
+			return filepath.Join(beadsDir, name), nil
+		}
+	}
+
+	// Fall back to issues.jsonl (legacy) or first candidate
+	for _, name := range candidates {
+		if name == "issues.jsonl" {
+			return filepath.Join(beadsDir, name), nil
+		}
+	}
+
+	return filepath.Join(beadsDir, candidates[0]), nil
+}
+
+// LoadIssues reads issues from the .beads directory in the given repository path.
+// Automatically finds the correct JSONL file (beads.jsonl preferred, issues.jsonl fallback).
 func LoadIssues(repoPath string) ([]model.Issue, error) {
 	if repoPath == "" {
 		var err error
@@ -20,7 +75,12 @@ func LoadIssues(repoPath string) ([]model.Issue, error) {
 		}
 	}
 
-	jsonlPath := filepath.Join(repoPath, ".beads", "issues.jsonl")
+	beadsDir := filepath.Join(repoPath, ".beads")
+	jsonlPath, err := FindJSONLPath(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+
 	return LoadIssuesFromFile(jsonlPath)
 }
 
