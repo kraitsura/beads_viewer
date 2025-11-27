@@ -3,7 +3,9 @@ package ui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -15,7 +17,9 @@ import (
 	"beads_viewer/pkg/recipe"
 	"beads_viewer/pkg/updater"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -42,6 +46,7 @@ const (
 	focusRecipePicker
 	focusHelp
 	focusQuitConfirm
+	focusTimeTravelInput
 )
 
 // UpdateMsg is sent when a new version is available
@@ -125,6 +130,10 @@ type Model struct {
 	newIssueIDs      map[string]bool // Issues in diff.NewIssues
 	closedIssueIDs   map[string]bool // Issues in diff.ClosedIssues
 	modifiedIssueIDs map[string]bool // Issues in diff.ModifiedIssues
+
+	// Time-travel input prompt
+	timeTravelInput      textinput.Model
+	showTimeTravelPrompt bool
 
 	// Status message (for temporary feedback)
 	statusMsg     string
@@ -274,6 +283,15 @@ func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe) Model {
 	_ = recipeLoader.Load() // Load recipes (errors are non-fatal, will just show empty)
 	recipePicker := NewRecipePickerModel(recipeLoader.List(), theme)
 
+	// Initialize time-travel input
+	ti := textinput.New()
+	ti.Placeholder = "HEAD~5, main, v1.0.0, 2024-01-01..."
+	ti.CharLimit = 100
+	ti.Width = 40
+	ti.Prompt = "⏱️  Revision: "
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(theme.Primary).Bold(true)
+	ti.TextStyle = lipgloss.NewStyle().Foreground(theme.Base.GetForeground())
+
 	return Model{
 		issues:            issues,
 		issueMap:          issueMap,
@@ -295,6 +313,7 @@ func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe) Model {
 		recipeLoader:      recipeLoader,
 		recipePicker:      recipePicker,
 		activeRecipe:      activeRecipe,
+		timeTravelInput:   ti,
 	}
 }
 
@@ -493,6 +512,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Focus-specific key handling
 			switch m.focused {
+			case focusTimeTravelInput:
+				m = m.handleTimeTravelInputKeys(msg)
+				return m, nil
+
 			case focusRecipePicker:
 				m = m.handleRecipePickerKeys(msg)
 
@@ -868,13 +891,55 @@ func (m Model) handleListKeys(msg tea.KeyMsg) Model {
 	case "a":
 		m.currentFilter = "all"
 		m.applyFilter()
-	case "t", "T":
-		// Toggle time-travel mode
+	case "t":
+		// Toggle time-travel mode off, or show prompt for custom revision
 		if m.timeTravelMode {
 			m.exitTimeTravelMode()
 		} else {
-			m.enterTimeTravelMode("HEAD~5") // Default to comparing with 5 commits ago
+			// Show input prompt for revision
+			m.showTimeTravelPrompt = true
+			m.timeTravelInput.SetValue("")
+			m.timeTravelInput.Focus()
+			m.focused = focusTimeTravelInput
 		}
+	case "T":
+		// Quick time-travel with default HEAD~5
+		if m.timeTravelMode {
+			m.exitTimeTravelMode()
+		} else {
+			m.enterTimeTravelMode("HEAD~5")
+		}
+	case "C":
+		// Copy selected issue to clipboard
+		m.copyIssueToClipboard()
+	case "O":
+		// Open beads.jsonl in editor
+		m.openInEditor()
+	}
+	return m
+}
+
+// handleTimeTravelInputKeys handles keyboard input for the time-travel revision prompt
+func (m Model) handleTimeTravelInputKeys(msg tea.KeyMsg) Model {
+	switch msg.String() {
+	case "enter":
+		// Submit the revision
+		revision := strings.TrimSpace(m.timeTravelInput.Value())
+		if revision == "" {
+			revision = "HEAD~5" // Default if empty
+		}
+		m.showTimeTravelPrompt = false
+		m.timeTravelInput.Blur()
+		m.focused = focusList
+		m.enterTimeTravelMode(revision)
+	case "esc":
+		// Cancel
+		m.showTimeTravelPrompt = false
+		m.timeTravelInput.Blur()
+		m.focused = focusList
+	default:
+		// Update the textinput
+		m.timeTravelInput, _ = m.timeTravelInput.Update(msg)
 	}
 	return m
 }
@@ -889,6 +954,8 @@ func (m Model) View() string {
 	// Quit confirmation overlay takes highest priority
 	if m.showQuitConfirm {
 		body = m.renderQuitConfirm()
+	} else if m.showTimeTravelPrompt {
+		body = m.renderTimeTravelPrompt()
 	} else if m.showRecipePicker {
 		body = m.recipePicker.View()
 	} else if m.showHelp {
@@ -1225,7 +1292,11 @@ func (m Model) renderHelpOverlay() string {
 	sb.WriteString(sectionStyle.Render("General"))
 	sb.WriteString("\n")
 	general := []struct{ key, desc string }{
+		{"t", "Time-travel (custom revision)"},
+		{"T", "Time-travel (HEAD~5)"},
 		{"E", "Export to Markdown"},
+		{"C", "Copy issue to clipboard"},
+		{"O", "Open in editor"},
 		{"q", "Back / Quit"},
 		{"Ctrl+c", "Force quit"},
 	}
@@ -1393,15 +1464,17 @@ func (m *Model) renderFooter() string {
 		keyHints = append(keyHints, keyStyle.Render("j/k")+" nav", keyStyle.Render("⏎")+" view", keyStyle.Render("a")+" list", keyStyle.Render("?")+" help")
 	} else if m.list.FilterState() == list.Filtering {
 		keyHints = append(keyHints, keyStyle.Render("esc")+" cancel", keyStyle.Render("⏎")+" select")
+	} else if m.showTimeTravelPrompt {
+		keyHints = append(keyHints, keyStyle.Render("⏎")+" compare", keyStyle.Render("esc")+" cancel")
 	} else {
 		if m.timeTravelMode {
-			keyHints = append(keyHints, keyStyle.Render("t")+" exit diff", keyStyle.Render("R")+" recipe", keyStyle.Render("abgi")+" views", keyStyle.Render("?")+" help")
+			keyHints = append(keyHints, keyStyle.Render("t")+" exit diff", keyStyle.Render("C")+" copy", keyStyle.Render("abgi")+" views", keyStyle.Render("?")+" help")
 		} else if m.isSplitView {
-			keyHints = append(keyHints, keyStyle.Render("tab")+" focus", keyStyle.Render("R")+" recipe", keyStyle.Render("abgi")+" views", keyStyle.Render("?")+" help")
+			keyHints = append(keyHints, keyStyle.Render("tab")+" focus", keyStyle.Render("C")+" copy", keyStyle.Render("E")+" export", keyStyle.Render("?")+" help")
 		} else if m.showDetails {
-			keyHints = append(keyHints, keyStyle.Render("esc")+" back", keyStyle.Render("j/k")+" scroll", keyStyle.Render("?")+" help")
+			keyHints = append(keyHints, keyStyle.Render("esc")+" back", keyStyle.Render("C")+" copy", keyStyle.Render("O")+" edit", keyStyle.Render("?")+" help")
 		} else {
-			keyHints = append(keyHints, keyStyle.Render("⏎")+" details", keyStyle.Render("R")+" recipe", keyStyle.Render("t")+" diff", keyStyle.Render("abgi")+" views", keyStyle.Render("?")+" help")
+			keyHints = append(keyHints, keyStyle.Render("⏎")+" details", keyStyle.Render("t")+" diff", keyStyle.Render("ECO")+" actions", keyStyle.Render("?")+" help")
 		}
 	}
 
@@ -1924,4 +1997,164 @@ func (m *Model) generateExportFilename() string {
 	// Format: beads_report_<project>_YYYY-MM-DD.md
 	timestamp := time.Now().Format("2006-01-02")
 	return fmt.Sprintf("beads_report_%s_%s.md", projectName, timestamp)
+}
+
+// renderTimeTravelPrompt renders the time-travel revision input overlay
+func (m Model) renderTimeTravelPrompt() string {
+	t := m.theme
+
+	boxStyle := t.Renderer.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Primary).
+		Padding(1, 3).
+		Align(lipgloss.Center)
+
+	titleStyle := t.Renderer.NewStyle().
+		Foreground(t.Primary).
+		Bold(true)
+
+	subtitleStyle := t.Renderer.NewStyle().
+		Foreground(t.Subtext).
+		Italic(true)
+
+	exampleStyle := t.Renderer.NewStyle().
+		Foreground(t.Secondary)
+
+	keyStyle := t.Renderer.NewStyle().
+		Foreground(t.Primary).
+		Bold(true)
+
+	textStyle := t.Renderer.NewStyle().
+		Foreground(t.Base.GetForeground())
+
+	// Build content
+	content := titleStyle.Render("⏱️  Time-Travel Mode") + "\n\n" +
+		subtitleStyle.Render("Compare current state with a historical revision") + "\n\n" +
+		m.timeTravelInput.View() + "\n\n" +
+		exampleStyle.Render("Examples: HEAD~5, main, v1.0.0, 2024-01-01, abc123") + "\n\n" +
+		textStyle.Render("Press ") + keyStyle.Render("Enter") + textStyle.Render(" to compare, ") +
+		keyStyle.Render("Esc") + textStyle.Render(" to cancel")
+
+	box := boxStyle.Render(content)
+
+	return lipgloss.Place(
+		m.width,
+		m.height-1,
+		lipgloss.Center,
+		lipgloss.Center,
+		box,
+	)
+}
+
+// copyIssueToClipboard copies the selected issue to clipboard as Markdown
+func (m *Model) copyIssueToClipboard() {
+	selectedItem := m.list.SelectedItem()
+	if selectedItem == nil {
+		m.statusMsg = "❌ No issue selected"
+		m.statusIsError = true
+		return
+	}
+
+	issueItem, ok := selectedItem.(IssueItem)
+	if !ok {
+		m.statusMsg = "❌ Invalid item type"
+		m.statusIsError = true
+		return
+	}
+	issue := issueItem.Issue
+
+	// Format issue as Markdown
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# %s %s\n\n", GetTypeIconMD(string(issue.IssueType)), issue.Title))
+	sb.WriteString(fmt.Sprintf("**ID:** %s  \n", issue.ID))
+	sb.WriteString(fmt.Sprintf("**Status:** %s  \n", strings.ToUpper(string(issue.Status))))
+	sb.WriteString(fmt.Sprintf("**Priority:** P%d  \n", issue.Priority))
+	if issue.Assignee != "" {
+		sb.WriteString(fmt.Sprintf("**Assignee:** @%s  \n", issue.Assignee))
+	}
+	sb.WriteString(fmt.Sprintf("**Created:** %s  \n", issue.CreatedAt.Format("2006-01-02")))
+
+	if len(issue.Labels) > 0 {
+		sb.WriteString(fmt.Sprintf("**Labels:** %s  \n", strings.Join(issue.Labels, ", ")))
+	}
+
+	if issue.Description != "" {
+		sb.WriteString(fmt.Sprintf("\n## Description\n\n%s\n", issue.Description))
+	}
+
+	if issue.AcceptanceCriteria != "" {
+		sb.WriteString(fmt.Sprintf("\n## Acceptance Criteria\n\n%s\n", issue.AcceptanceCriteria))
+	}
+
+	// Dependencies
+	if len(issue.Dependencies) > 0 {
+		sb.WriteString("\n## Dependencies\n\n")
+		for _, dep := range issue.Dependencies {
+			sb.WriteString(fmt.Sprintf("- %s (%s)\n", dep.DependsOnID, dep.Type))
+		}
+	}
+
+	// Copy to clipboard
+	err := clipboard.WriteAll(sb.String())
+	if err != nil {
+		m.statusMsg = fmt.Sprintf("❌ Clipboard error: %v", err)
+		m.statusIsError = true
+		return
+	}
+
+	m.statusMsg = fmt.Sprintf("📋 Copied %s to clipboard", issue.ID)
+	m.statusIsError = false
+}
+
+// openInEditor opens the beads.jsonl file in the user's preferred editor
+func (m *Model) openInEditor() {
+	cwd, err := os.Getwd()
+	if err != nil {
+		m.statusMsg = "❌ Cannot get working directory"
+		m.statusIsError = true
+		return
+	}
+
+	beadsFile := filepath.Join(cwd, ".beads", "beads.jsonl")
+	if _, err := os.Stat(beadsFile); os.IsNotExist(err) {
+		m.statusMsg = "❌ No .beads/beads.jsonl file found"
+		m.statusIsError = true
+		return
+	}
+
+	// Determine editor
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		// Platform-specific defaults
+		switch runtime.GOOS {
+		case "windows":
+			editor = "notepad"
+		case "darwin":
+			editor = "nano" // macOS ships with nano
+		default:
+			editor = "nano" // Most Linux distros have nano
+		}
+	}
+
+	// Launch editor
+	cmd := exec.Command(editor, beadsFile)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// For terminal-based editors, we need to handle differently
+	// We'll just start the process and let the user know
+	err = cmd.Start()
+	if err != nil {
+		m.statusMsg = fmt.Sprintf("❌ Failed to open editor: %v", err)
+		m.statusIsError = true
+		return
+	}
+
+	m.statusMsg = fmt.Sprintf("📝 Opened in %s (background)", editor)
+	m.statusIsError = false
 }

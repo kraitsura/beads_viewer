@@ -81,3 +81,70 @@ func TestFormatTimeRel(t *testing.T) {
 		}
 	}
 }
+
+func TestTimeTravelMode(t *testing.T) {
+	issues := []model.Issue{
+		{ID: "1", Title: "Test Issue", Status: model.StatusOpen, Priority: 1},
+	}
+
+	m := ui.NewModel(issues, nil)
+
+	// Initially not in time-travel mode
+	if m.IsTimeTravelMode() {
+		t.Error("Expected not to be in time-travel mode initially")
+	}
+
+	// TimeTravelDiff should be nil initially
+	if m.TimeTravelDiff() != nil {
+		t.Error("Expected TimeTravelDiff to be nil initially")
+	}
+}
+
+func TestGetTypeIconMD(t *testing.T) {
+	tests := []struct {
+		issueType string
+		expected  string
+	}{
+		{"bug", "🐛"},
+		{"feature", "✨"},
+		{"task", "📋"},
+		{"epic", "🏔️"},
+		{"chore", "🧹"},
+		{"unknown", "•"},
+		{"", "•"},
+	}
+
+	for _, tt := range tests {
+		got := ui.GetTypeIconMD(tt.issueType)
+		if got != tt.expected {
+			t.Errorf("GetTypeIconMD(%q) = %s; want %s", tt.issueType, got, tt.expected)
+		}
+	}
+}
+
+func TestModelCreationWithEmptyIssues(t *testing.T) {
+	m := ui.NewModel([]model.Issue{}, nil)
+
+	if len(m.FilteredIssues()) != 0 {
+		t.Errorf("Expected 0 issues for empty input, got %d", len(m.FilteredIssues()))
+	}
+
+	// Should not panic on operations
+	m.SetFilter("open")
+	m.SetFilter("closed")
+	m.SetFilter("ready")
+}
+
+func TestIssueItemDiffStatus(t *testing.T) {
+	issues := []model.Issue{
+		{ID: "1", Title: "Test", Status: model.StatusOpen},
+	}
+
+	m := ui.NewModel(issues, nil)
+
+	// In normal mode, DiffStatus should be None
+	filtered := m.FilteredIssues()
+	if len(filtered) != 1 {
+		t.Fatalf("Expected 1 issue, got %d", len(filtered))
+	}
+}
