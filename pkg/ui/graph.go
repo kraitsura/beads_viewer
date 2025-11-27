@@ -11,7 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// GraphModel represents the dependency graph view - ego-centric neighborhood display
+// GraphModel represents the dependency graph view with visual ASCII art visualization
 type GraphModel struct {
 	issues       []model.Issue
 	issueMap     map[string]*model.Issue
@@ -28,6 +28,16 @@ type GraphModel struct {
 
 	// Flat list for navigation
 	sortedIDs []string
+
+	// Precomputed rankings for all metrics (id -> rank, 1-indexed)
+	rankPageRank     map[string]int
+	rankBetweenness  map[string]int
+	rankEigenvector  map[string]int
+	rankHubs         map[string]int
+	rankAuthorities  map[string]int
+	rankCriticalPath map[string]int
+	rankInDegree     map[string]int
+	rankOutDegree    map[string]int
 }
 
 // NewGraphModel creates a new graph view from issues
@@ -64,21 +74,22 @@ func (g *GraphModel) rebuildGraph() {
 	for _, issue := range g.issues {
 		for _, dep := range issue.Dependencies {
 			if dep.Type == model.DepBlocks || dep.Type == model.DepParentChild {
-				// issue depends on dep.DependsOnID
 				g.blockers[issue.ID] = append(g.blockers[issue.ID], dep.DependsOnID)
-				// dep.DependsOnID blocks issue
 				g.dependents[dep.DependsOnID] = append(g.dependents[dep.DependsOnID], issue.ID)
 			}
 		}
 	}
 
-	// Sort by impact score (from insights) if available, else by ID
+	// Compute rankings for all metrics
+	g.computeRankings()
+
+	// Sort by critical path score if available, else by ID
 	if g.insights != nil && g.insights.Stats != nil {
 		sort.Slice(g.sortedIDs, func(i, j int) bool {
 			scoreI := g.insights.Stats.CriticalPathScore[g.sortedIDs[i]]
 			scoreJ := g.insights.Stats.CriticalPathScore[g.sortedIDs[j]]
 			if scoreI != scoreJ {
-				return scoreI > scoreJ // Higher impact first
+				return scoreI > scoreJ
 			}
 			return g.sortedIDs[i] < g.sortedIDs[j]
 		})
@@ -89,6 +100,73 @@ func (g *GraphModel) rebuildGraph() {
 	if g.selectedIdx >= len(g.sortedIDs) {
 		g.selectedIdx = 0
 	}
+}
+
+// computeRankings precomputes rankings for all metrics
+func (g *GraphModel) computeRankings() {
+	g.rankPageRank = make(map[string]int)
+	g.rankBetweenness = make(map[string]int)
+	g.rankEigenvector = make(map[string]int)
+	g.rankHubs = make(map[string]int)
+	g.rankAuthorities = make(map[string]int)
+	g.rankCriticalPath = make(map[string]int)
+	g.rankInDegree = make(map[string]int)
+	g.rankOutDegree = make(map[string]int)
+
+	if g.insights == nil || g.insights.Stats == nil {
+		return
+	}
+
+	stats := g.insights.Stats
+
+	// Helper to compute ranks from a float64 map (higher = better rank)
+	computeFloatRanks := func(m map[string]float64) map[string]int {
+		ranks := make(map[string]int)
+		type kv struct {
+			k string
+			v float64
+		}
+		var sorted []kv
+		for k, v := range m {
+			sorted = append(sorted, kv{k, v})
+		}
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].v > sorted[j].v // Descending
+		})
+		for i, item := range sorted {
+			ranks[item.k] = i + 1 // 1-indexed
+		}
+		return ranks
+	}
+
+	// Helper for int maps
+	computeIntRanks := func(m map[string]int) map[string]int {
+		ranks := make(map[string]int)
+		type kv struct {
+			k string
+			v int
+		}
+		var sorted []kv
+		for k, v := range m {
+			sorted = append(sorted, kv{k, v})
+		}
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].v > sorted[j].v
+		})
+		for i, item := range sorted {
+			ranks[item.k] = i + 1
+		}
+		return ranks
+	}
+
+	g.rankPageRank = computeFloatRanks(stats.PageRank)
+	g.rankBetweenness = computeFloatRanks(stats.Betweenness)
+	g.rankEigenvector = computeFloatRanks(stats.Eigenvector)
+	g.rankHubs = computeFloatRanks(stats.Hubs)
+	g.rankAuthorities = computeFloatRanks(stats.Authorities)
+	g.rankCriticalPath = computeFloatRanks(stats.CriticalPathScore)
+	g.rankInDegree = computeIntRanks(stats.InDegree)
+	g.rankOutDegree = computeIntRanks(stats.OutDegree)
 }
 
 // Navigation
@@ -128,9 +206,7 @@ func (g *GraphModel) PageDown() {
 func (g *GraphModel) ScrollLeft()  {}
 func (g *GraphModel) ScrollRight() {}
 
-func (g *GraphModel) ensureVisible() {
-	// Will be used with scrollOffset if needed
-}
+func (g *GraphModel) ensureVisible() {}
 
 func (g *GraphModel) SelectedIssue() *model.Issue {
 	if len(g.sortedIDs) == 0 {
@@ -144,7 +220,7 @@ func (g *GraphModel) TotalCount() int {
 	return len(g.sortedIDs)
 }
 
-// View renders the ego-centric graph view
+// View renders the visual graph view
 func (g *GraphModel) View(width, height int) string {
 	g.width = width
 	g.height = height
@@ -165,45 +241,43 @@ func (g *GraphModel) View(width, height int) string {
 		return "Error: selected issue not found"
 	}
 
-	// Layout: Left panel (node list) | Right panel (neighborhood view)
-	listWidth := 32
-	if width < 100 {
+	// Layout: Left panel (node list) | Right panel (visual graph + metrics)
+	listWidth := 28
+	if width < 120 {
 		listWidth = 24
 	}
 	if width < 80 {
-		// Narrow: just show neighborhood
-		return g.renderNeighborhood(selectedID, selectedIssue, width, height, t)
+		// Narrow: just show visual graph
+		return g.renderVisualGraph(selectedID, selectedIssue, width, height, t)
 	}
 
-	detailWidth := width - listWidth - 3 // 3 for border/separator
+	detailWidth := width - listWidth - 3
 
 	// Left: scrollable list of all nodes
 	listView := g.renderNodeList(listWidth, height-2, t)
 
-	// Right: neighborhood view of selected node
-	neighborView := g.renderNeighborhood(selectedID, selectedIssue, detailWidth, height-2, t)
+	// Right: visual graph + metrics
+	graphView := g.renderVisualGraph(selectedID, selectedIssue, detailWidth, height-2, t)
 
 	// Combine with separator
 	separator := t.Renderer.NewStyle().
 		Foreground(t.Secondary).
 		Render(strings.Repeat("│\n", height-2))
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, listView, separator, neighborView)
+	return lipgloss.JoinHorizontal(lipgloss.Top, listView, separator, graphView)
 }
 
 // renderNodeList renders the left panel with all nodes
 func (g *GraphModel) renderNodeList(width, height int, t Theme) string {
 	var lines []string
 
-	// Header
 	headerStyle := t.Renderer.NewStyle().
 		Bold(true).
 		Foreground(t.Primary).
 		Width(width)
-	lines = append(lines, headerStyle.Render("📊 Nodes ("+fmt.Sprintf("%d", len(g.sortedIDs))+")"))
+	lines = append(lines, headerStyle.Render(fmt.Sprintf("📊 Nodes (%d)", len(g.sortedIDs))))
 	lines = append(lines, strings.Repeat("─", width))
 
-	// Calculate visible range
 	visibleItems := height - 4
 	if visibleItems < 1 {
 		visibleItems = 1
@@ -222,7 +296,6 @@ func (g *GraphModel) renderNodeList(width, height int, t Theme) string {
 		endIdx = len(g.sortedIDs)
 	}
 
-	// Render visible items
 	for i := startIdx; i < endIdx; i++ {
 		id := g.sortedIDs[i]
 		issue := g.issueMap[id]
@@ -231,14 +304,9 @@ func (g *GraphModel) renderNodeList(width, height int, t Theme) string {
 		}
 
 		isSelected := i == g.selectedIdx
-
-		// Status indicator
 		statusIcon := getStatusIcon(issue.Status)
-
-		// Truncate ID to fit
-		maxIDLen := width - 4 // 2 for status, 2 for padding
+		maxIDLen := width - 4
 		displayID := smartTruncateID(id, maxIDLen)
-
 		line := fmt.Sprintf("%s %s", statusIcon, displayID)
 
 		var style lipgloss.Style
@@ -253,11 +321,9 @@ func (g *GraphModel) renderNodeList(width, height int, t Theme) string {
 				Foreground(getStatusColor(issue.Status, t)).
 				Width(width)
 		}
-
 		lines = append(lines, style.Render(line))
 	}
 
-	// Scroll indicator
 	if len(g.sortedIDs) > visibleItems {
 		scrollInfo := fmt.Sprintf("(%d-%d of %d)", startIdx+1, endIdx, len(g.sortedIDs))
 		scrollStyle := t.Renderer.NewStyle().
@@ -271,137 +337,390 @@ func (g *GraphModel) renderNodeList(width, height int, t Theme) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderNeighborhood renders the ego-centric view of selected node
-func (g *GraphModel) renderNeighborhood(id string, issue *model.Issue, width, height int, t Theme) string {
+// renderVisualGraph renders the ASCII art graph visualization with metrics
+func (g *GraphModel) renderVisualGraph(id string, issue *model.Issue, width, height int, t Theme) string {
 	var sections []string
 
-	// Header with selected node info
-	headerStyle := t.Renderer.NewStyle().
-		Bold(true).
-		Foreground(t.Primary)
+	blockerIDs := g.blockers[id]
+	dependentIDs := g.dependents[id]
 
-	statusIcon := getStatusIcon(issue.Status)
-	prioIcon := getPriorityIcon(issue.Priority)
-	typeIcon := getTypeIcon(issue.IssueType)
+	// ═══════════════════════════════════════════════════════════════════════
+	// BLOCKERS SECTION (what this issue depends on)
+	// ═══════════════════════════════════════════════════════════════════════
+	if len(blockerIDs) > 0 {
+		sections = append(sections, g.renderBlockersVisual(blockerIDs, width, t))
+		// Connecting lines down to ego
+		sections = append(sections, g.renderConnectorDown(len(blockerIDs), width, t))
+	}
 
-	header := headerStyle.Render(fmt.Sprintf("%s %s %s %s", statusIcon, prioIcon, typeIcon, id))
-	sections = append(sections, header)
+	// ═══════════════════════════════════════════════════════════════════════
+	// EGO NODE (selected issue) - prominent center box
+	// ═══════════════════════════════════════════════════════════════════════
+	sections = append(sections, g.renderEgoNode(id, issue, width, t))
 
-	// Title
-	if issue.Title != "" {
-		titleStyle := t.Renderer.NewStyle().
-			Foreground(t.Base.GetForeground()).
-			Width(width - 2)
-		title := truncateRunesHelper(issue.Title, width-4, "…")
-		sections = append(sections, titleStyle.Render("   "+title))
+	// ═══════════════════════════════════════════════════════════════════════
+	// DEPENDENTS SECTION (what depends on this issue)
+	// ═══════════════════════════════════════════════════════════════════════
+	if len(dependentIDs) > 0 {
+		// Connecting lines down from ego
+		sections = append(sections, g.renderConnectorDown(len(dependentIDs), width, t))
+		sections = append(sections, g.renderDependentsVisual(dependentIDs, width, t))
 	}
 
 	sections = append(sections, "")
 
-	// Stats line
-	blockerCount := len(g.blockers[id])
-	dependentCount := len(g.dependents[id])
-
-	statsStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
-	stats := fmt.Sprintf("⬆️ Blocked by: %d    ⬇️ Blocks: %d", blockerCount, dependentCount)
-	sections = append(sections, statsStyle.Render(stats))
-	sections = append(sections, "")
-
-	// BLOCKERS section (what this issue depends on)
-	if blockerCount > 0 {
-		sections = append(sections, renderSectionHeader("⬆️ BLOCKED BY (must complete first)", t))
-		for i, blockerID := range g.blockers[id] {
-			if i >= 8 { // Limit to 8 items
-				remaining := blockerCount - 8
-				sections = append(sections, t.Renderer.NewStyle().
-					Foreground(t.Secondary).
-					Italic(true).
-					Render(fmt.Sprintf("   ... and %d more", remaining)))
-				break
-			}
-			sections = append(sections, g.renderRelatedNode(blockerID, width, t, "   "))
-		}
-		sections = append(sections, "")
-	}
-
-	// DEPENDENTS section (what depends on this issue)
-	if dependentCount > 0 {
-		sections = append(sections, renderSectionHeader("⬇️ BLOCKS (waiting on this)", t))
-		for i, depID := range g.dependents[id] {
-			if i >= 8 { // Limit to 8 items
-				remaining := dependentCount - 8
-				sections = append(sections, t.Renderer.NewStyle().
-					Foreground(t.Secondary).
-					Italic(true).
-					Render(fmt.Sprintf("   ... and %d more", remaining)))
-				break
-			}
-			sections = append(sections, g.renderRelatedNode(depID, width, t, "   "))
-		}
-		sections = append(sections, "")
-	}
-
-	// Insights section (if available)
-	if g.insights != nil && g.insights.Stats != nil {
-		sections = append(sections, renderSectionHeader("📈 IMPACT METRICS", t))
-
-		metricsStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
-
-		if score, ok := g.insights.Stats.PageRank[id]; ok && score > 0 {
-			sections = append(sections, metricsStyle.Render(fmt.Sprintf("   PageRank: %.4f", score)))
-		}
-		if score, ok := g.insights.Stats.CriticalPathScore[id]; ok && score > 0 {
-			sections = append(sections, metricsStyle.Render(fmt.Sprintf("   Critical Path: %.2f", score)))
-		}
-		if score, ok := g.insights.Stats.Betweenness[id]; ok && score > 0 {
-			sections = append(sections, metricsStyle.Render(fmt.Sprintf("   Betweenness: %.4f", score)))
-		}
-	}
+	// ═══════════════════════════════════════════════════════════════════════
+	// COMPREHENSIVE METRICS PANEL - ALL 8 metrics with values AND ranks
+	// ═══════════════════════════════════════════════════════════════════════
+	sections = append(sections, g.renderMetricsPanel(id, width, t))
 
 	// Navigation hint
-	sections = append(sections, "")
 	navStyle := t.Renderer.NewStyle().
 		Foreground(t.Secondary).
 		Italic(true)
+	sections = append(sections, "")
 	sections = append(sections, navStyle.Render("j/k: navigate • enter: view details • g: back to list"))
 
 	return strings.Join(sections, "\n")
 }
 
-func (g *GraphModel) renderRelatedNode(id string, width int, t Theme, prefix string) string {
-	issue := g.issueMap[id]
-	if issue == nil {
-		return t.Renderer.NewStyle().
-			Foreground(t.Secondary).
-			Italic(true).
-			Render(prefix + id + " (not in current filter)")
-	}
-
-	statusIcon := getStatusIcon(issue.Status)
-	statusColor := getStatusColor(issue.Status, t)
-
-	// Format: prefix + status + truncated ID + title snippet
-	maxIDLen := 20
-	displayID := smartTruncateID(id, maxIDLen)
-
-	titleSnippet := ""
-	remainingWidth := width - len(prefix) - 3 - len(displayID) - 3
-	if remainingWidth > 10 && issue.Title != "" {
-		titleSnippet = " " + truncateRunesHelper(issue.Title, remainingWidth, "…")
-	}
-
-	line := fmt.Sprintf("%s%s %s%s", prefix, statusIcon, displayID, titleSnippet)
-
-	return t.Renderer.NewStyle().
-		Foreground(statusColor).
-		Render(line)
-}
-
-func renderSectionHeader(title string, t Theme) string {
-	return t.Renderer.NewStyle().
+// renderBlockersVisual renders blocker nodes as boxes
+func (g *GraphModel) renderBlockersVisual(blockerIDs []string, width int, t Theme) string {
+	headerStyle := t.Renderer.NewStyle().
 		Bold(true).
 		Foreground(t.Feature).
-		Render(title)
+		Width(width).
+		Align(lipgloss.Center)
+
+	header := headerStyle.Render("▲ BLOCKED BY (must complete first) ▲")
+
+	// Calculate box width based on available space and number of blockers
+	maxBoxes := 5
+	if len(blockerIDs) < maxBoxes {
+		maxBoxes = len(blockerIDs)
+	}
+	boxWidth := (width - 4) / maxBoxes
+	if boxWidth > 20 {
+		boxWidth = 20
+	}
+	if boxWidth < 12 {
+		boxWidth = 12
+	}
+
+	var boxes []string
+	for i, bid := range blockerIDs {
+		if i >= 5 {
+			remaining := len(blockerIDs) - 5
+			boxes = append(boxes, t.Renderer.NewStyle().
+				Foreground(t.Secondary).
+				Italic(true).
+				Render(fmt.Sprintf("+%d more", remaining)))
+			break
+		}
+		boxes = append(boxes, g.renderNodeBox(bid, boxWidth, t, false))
+	}
+
+	boxRow := lipgloss.JoinHorizontal(lipgloss.Center, boxes...)
+	centered := t.Renderer.NewStyle().Width(width).Align(lipgloss.Center).Render(boxRow)
+
+	return header + "\n" + centered
+}
+
+// renderDependentsVisual renders dependent nodes as boxes
+func (g *GraphModel) renderDependentsVisual(dependentIDs []string, width int, t Theme) string {
+	maxBoxes := 5
+	if len(dependentIDs) < maxBoxes {
+		maxBoxes = len(dependentIDs)
+	}
+	boxWidth := (width - 4) / maxBoxes
+	if boxWidth > 20 {
+		boxWidth = 20
+	}
+	if boxWidth < 12 {
+		boxWidth = 12
+	}
+
+	var boxes []string
+	for i, did := range dependentIDs {
+		if i >= 5 {
+			remaining := len(dependentIDs) - 5
+			boxes = append(boxes, t.Renderer.NewStyle().
+				Foreground(t.Secondary).
+				Italic(true).
+				Render(fmt.Sprintf("+%d more", remaining)))
+			break
+		}
+		boxes = append(boxes, g.renderNodeBox(did, boxWidth, t, false))
+	}
+
+	boxRow := lipgloss.JoinHorizontal(lipgloss.Center, boxes...)
+	centered := t.Renderer.NewStyle().Width(width).Align(lipgloss.Center).Render(boxRow)
+
+	headerStyle := t.Renderer.NewStyle().
+		Bold(true).
+		Foreground(t.Feature).
+		Width(width).
+		Align(lipgloss.Center)
+
+	header := headerStyle.Render("▼ BLOCKS (waiting on this) ▼")
+
+	return centered + "\n" + header
+}
+
+// renderNodeBox renders a single node as an ASCII box
+func (g *GraphModel) renderNodeBox(id string, boxWidth int, t Theme, isEgo bool) string {
+	issue := g.issueMap[id]
+
+	var statusIcon, displayID, title string
+	var statusColor lipgloss.AdaptiveColor
+
+	if issue != nil {
+		statusIcon = getStatusIcon(issue.Status)
+		statusColor = getStatusColor(issue.Status, t)
+		displayID = smartTruncateID(id, boxWidth-4)
+		if issue.Title != "" {
+			title = truncateRunesHelper(issue.Title, boxWidth-4, "…")
+		}
+	} else {
+		statusIcon = "❓"
+		statusColor = t.Secondary
+		displayID = smartTruncateID(id, boxWidth-4)
+		title = "(not in filter)"
+	}
+
+	// Build box content
+	line1 := fmt.Sprintf("%s %s", statusIcon, displayID)
+
+	var boxStyle lipgloss.Style
+	if isEgo {
+		// Ego node gets double-line border and highlight
+		boxStyle = t.Renderer.NewStyle().
+			Border(lipgloss.DoubleBorder()).
+			BorderForeground(t.Primary).
+			Foreground(t.Primary).
+			Bold(true).
+			Width(boxWidth).
+			Align(lipgloss.Center).
+			Padding(0, 1)
+	} else {
+		boxStyle = t.Renderer.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(statusColor).
+			Foreground(statusColor).
+			Width(boxWidth).
+			Align(lipgloss.Center).
+			Padding(0, 0)
+	}
+
+	content := line1
+	if title != "" && boxWidth > 14 {
+		content = line1 + "\n" + title
+	}
+
+	return boxStyle.Render(content)
+}
+
+// renderEgoNode renders the selected/ego node prominently
+func (g *GraphModel) renderEgoNode(id string, issue *model.Issue, width int, t Theme) string {
+	statusIcon := getStatusIcon(issue.Status)
+	prioIcon := getPriorityIcon(issue.Priority)
+	typeIcon := getTypeIcon(issue.IssueType)
+
+	egoWidth := width / 2
+	if egoWidth > 50 {
+		egoWidth = 50
+	}
+	if egoWidth < 30 {
+		egoWidth = 30
+	}
+
+	icons := fmt.Sprintf("%s %s %s", statusIcon, prioIcon, typeIcon)
+	displayID := smartTruncateID(id, egoWidth-4)
+	title := ""
+	if issue.Title != "" {
+		title = truncateRunesHelper(issue.Title, egoWidth-4, "…")
+	}
+
+	content := icons + " " + displayID
+	if title != "" {
+		content += "\n" + title
+	}
+
+	// Add connection counts
+	blockerCount := len(g.blockers[id])
+	dependentCount := len(g.dependents[id])
+	content += fmt.Sprintf("\n⬆%d  ⬇%d", blockerCount, dependentCount)
+
+	egoStyle := t.Renderer.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(t.Primary).
+		Foreground(t.Primary).
+		Bold(true).
+		Width(egoWidth).
+		Align(lipgloss.Center).
+		Padding(0, 1)
+
+	box := egoStyle.Render(content)
+
+	// Center the ego box
+	return t.Renderer.NewStyle().Width(width).Align(lipgloss.Center).Render(box)
+}
+
+// renderConnectorDown renders connector lines between sections
+func (g *GraphModel) renderConnectorDown(count int, width int, t Theme) string {
+	if count == 0 {
+		return ""
+	}
+
+	connStyle := t.Renderer.NewStyle().
+		Foreground(t.Secondary).
+		Width(width).
+		Align(lipgloss.Center)
+
+	if count == 1 {
+		return connStyle.Render("│\n│\n▼")
+	}
+
+	// Multiple connections - fan pattern
+	lines := []string{"│"}
+	if count <= 3 {
+		lines = append(lines, "├─┼─┤"[:count*2+1])
+	} else {
+		lines = append(lines, "├─┼─┼─┼─┤"[:min(count*2+1, 9)])
+	}
+	lines = append(lines, "▼")
+
+	return connStyle.Render(strings.Join(lines, "\n"))
+}
+
+// renderMetricsPanel renders ALL graph metrics with values and ranks
+func (g *GraphModel) renderMetricsPanel(id string, width int, t Theme) string {
+	total := len(g.sortedIDs)
+
+	headerStyle := t.Renderer.NewStyle().
+		Bold(true).
+		Foreground(t.Primary).
+		Width(width)
+
+	header := headerStyle.Render("╔══════════════════════════════════════════════════════════════════════════╗")
+	title := headerStyle.Render("║                        📊 COMPREHENSIVE GRAPH METRICS                    ║")
+	sep := headerStyle.Render("╠══════════════════════════════════════════════════════════════════════════╣")
+	footer := headerStyle.Render("╚══════════════════════════════════════════════════════════════════════════╝")
+
+	if g.insights == nil || g.insights.Stats == nil {
+		noData := t.Renderer.NewStyle().
+			Foreground(t.Secondary).
+			Italic(true).
+			Width(width).
+			Align(lipgloss.Center).
+			Render("No graph analysis data available")
+		return header + "\n" + title + "\n" + sep + "\n" + noData + "\n" + footer
+	}
+
+	stats := g.insights.Stats
+
+	// Helper to format a metric with value and rank
+	formatMetric := func(name string, value float64, rank int, isInt bool) string {
+		var valStr string
+		if isInt {
+			valStr = fmt.Sprintf("%d", int(value))
+		} else if value >= 1.0 {
+			valStr = fmt.Sprintf("%.2f", value)
+		} else {
+			valStr = fmt.Sprintf("%.4f", value)
+		}
+		return fmt.Sprintf("%-16s %8s  #%-3d/%-3d", name, valStr, rank, total)
+	}
+
+	// Get all values and ranks
+	pageRank := stats.PageRank[id]
+	betweenness := stats.Betweenness[id]
+	eigenvector := stats.Eigenvector[id]
+	hubs := stats.Hubs[id]
+	authorities := stats.Authorities[id]
+	critPath := stats.CriticalPathScore[id]
+	inDeg := float64(stats.InDegree[id])
+	outDeg := float64(stats.OutDegree[id])
+
+	rankPR := g.rankPageRank[id]
+	rankBW := g.rankBetweenness[id]
+	rankEV := g.rankEigenvector[id]
+	rankHub := g.rankHubs[id]
+	rankAuth := g.rankAuthorities[id]
+	rankCP := g.rankCriticalPath[id]
+	rankIn := g.rankInDegree[id]
+	rankOut := g.rankOutDegree[id]
+
+	// If rank is 0, it means no data - set to total
+	if rankPR == 0 {
+		rankPR = total
+	}
+	if rankBW == 0 {
+		rankBW = total
+	}
+	if rankEV == 0 {
+		rankEV = total
+	}
+	if rankHub == 0 {
+		rankHub = total
+	}
+	if rankAuth == 0 {
+		rankAuth = total
+	}
+	if rankCP == 0 {
+		rankCP = total
+	}
+	if rankIn == 0 {
+		rankIn = total
+	}
+	if rankOut == 0 {
+		rankOut = total
+	}
+
+	metricStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+
+	// Two-column layout
+	col1 := []string{
+		formatMetric("Critical Path", critPath, rankCP, false),
+		formatMetric("PageRank", pageRank, rankPR, false),
+		formatMetric("Betweenness", betweenness, rankBW, false),
+		formatMetric("Eigenvector", eigenvector, rankEV, false),
+	}
+
+	col2 := []string{
+		formatMetric("In-Degree", inDeg, rankIn, true),
+		formatMetric("Out-Degree", outDeg, rankOut, true),
+		formatMetric("Hub Score", hubs, rankHub, false),
+		formatMetric("Authority", authorities, rankAuth, false),
+	}
+
+	var rows []string
+	rows = append(rows, header)
+	rows = append(rows, title)
+	rows = append(rows, sep)
+
+	for i := 0; i < 4; i++ {
+		left := metricStyle.Render("║ " + col1[i])
+		right := metricStyle.Render(col2[i] + " ║")
+		row := left + "  │  " + right
+		rows = append(rows, row)
+	}
+
+	rows = append(rows, footer)
+
+	// Add legend
+	legendStyle := t.Renderer.NewStyle().
+		Foreground(t.Secondary).
+		Italic(true).
+		Width(width).
+		Align(lipgloss.Center)
+
+	legend := legendStyle.Render(
+		"Critical Path=impact depth │ PageRank=importance │ Betweenness=bridge role │ In/Out=connections")
+
+	rows = append(rows, legend)
+
+	return strings.Join(rows, "\n")
 }
 
 // Helper functions
@@ -468,20 +787,16 @@ func getTypeIcon(itype model.IssueType) string {
 	}
 }
 
-// smartTruncateID creates a smart short ID from a long ID
 func smartTruncateID(id string, maxLen int) string {
 	if len(id) <= maxLen {
 		return id
 	}
 
-	// Try to create an abbreviated form for underscore-separated IDs
 	parts := strings.Split(id, "_")
 	if len(parts) > 2 {
-		// Take first letter of each part except last, keep more of last part
 		var abbrev strings.Builder
 		for i, part := range parts {
 			if i == len(parts)-1 {
-				// Last part: keep more of it
 				remaining := maxLen - abbrev.Len()
 				if remaining > 0 {
 					if len(part) <= remaining {
@@ -492,7 +807,6 @@ func smartTruncateID(id string, maxLen int) string {
 					}
 				}
 			} else {
-				// Non-last parts: just first char + underscore
 				if len(part) > 0 {
 					abbrev.WriteRune(rune(part[0]))
 					abbrev.WriteRune('_')
@@ -505,10 +819,16 @@ func smartTruncateID(id string, maxLen int) string {
 		}
 	}
 
-	// Fall back to simple truncation
 	runes := []rune(id)
 	if len(runes) > maxLen-1 {
 		return string(runes[:maxLen-1]) + "…"
 	}
 	return id
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
