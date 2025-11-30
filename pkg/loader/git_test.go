@@ -36,8 +36,8 @@ func setupTestGitRepo(t *testing.T) (string, func()) {
 	}
 
 	// Write initial beads file
-	initialContent := `{"id":"ISSUE-1","title":"First issue","status":"open","priority":1}
-{"id":"ISSUE-2","title":"Second issue","status":"open","priority":2}
+	initialContent := `{"id":"ISSUE-1","title":"First issue","status":"open","priority":1,"issue_type":"task"}
+{"id":"ISSUE-2","title":"Second issue","status":"open","priority":2,"issue_type":"task"}
 `
 	beadsFile := filepath.Join(beadsDir, "beads.base.jsonl")
 	if err := os.WriteFile(beadsFile, []byte(initialContent), 0644); err != nil {

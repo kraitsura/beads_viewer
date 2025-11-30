@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -29,6 +30,27 @@ type Issue struct {
 	Labels             []string      `json:"labels,omitempty"`
 	Dependencies       []*Dependency `json:"dependencies,omitempty"`
 	Comments           []*Comment    `json:"comments,omitempty"`
+	SourceRepo         string        `json:"source_repo,omitempty"`
+}
+
+// Validate checks if the issue data is logically valid
+func (i *Issue) Validate() error {
+	if i.ID == "" {
+		return fmt.Errorf("issue ID cannot be empty")
+	}
+	if i.Title == "" {
+		return fmt.Errorf("issue title cannot be empty")
+	}
+	if !i.Status.IsValid() {
+		return fmt.Errorf("invalid status: %s", i.Status)
+	}
+	if !i.IssueType.IsValid() {
+		return fmt.Errorf("invalid issue type: %s", i.IssueType)
+	}
+	if !i.UpdatedAt.IsZero() && !i.CreatedAt.IsZero() && i.UpdatedAt.Before(i.CreatedAt) {
+		return fmt.Errorf("updated_at (%v) cannot be before created_at (%v)", i.UpdatedAt, i.CreatedAt)
+	}
+	return nil
 }
 
 // Status represents the current state of an issue
@@ -41,6 +63,25 @@ const (
 	StatusClosed     Status = "closed"
 )
 
+// IsValid returns true if the status is a recognized value
+func (s Status) IsValid() bool {
+	switch s {
+	case StatusOpen, StatusInProgress, StatusBlocked, StatusClosed:
+		return true
+	}
+	return false
+}
+
+// IsClosed returns true if the status represents a closed state
+func (s Status) IsClosed() bool {
+	return s == StatusClosed
+}
+
+// IsOpen returns true if the status represents an active (open or in_progress) state
+func (s Status) IsOpen() bool {
+	return s == StatusOpen || s == StatusInProgress
+}
+
 // IssueType categorizes the kind of work
 type IssueType string
 
@@ -51,6 +92,15 @@ const (
 	TypeEpic    IssueType = "epic"
 	TypeChore   IssueType = "chore"
 )
+
+// IsValid returns true if the issue type is a recognized value
+func (t IssueType) IsValid() bool {
+	switch t {
+	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore:
+		return true
+	}
+	return false
+}
 
 // Dependency represents a relationship between issues
 type Dependency struct {
@@ -70,6 +120,20 @@ const (
 	DepParentChild    DependencyType = "parent-child"
 	DepDiscoveredFrom DependencyType = "discovered-from"
 )
+
+// IsValid returns true if the dependency type is a recognized value
+func (d DependencyType) IsValid() bool {
+	switch d {
+	case DepBlocks, DepRelated, DepParentChild, DepDiscoveredFrom:
+		return true
+	}
+	return false
+}
+
+// IsBlocking returns true if this dependency type represents a blocking relationship
+func (d DependencyType) IsBlocking() bool {
+	return d == DepBlocks
+}
 
 // Comment represents a comment on an issue
 type Comment struct {

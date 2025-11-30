@@ -255,6 +255,13 @@ func parseJSONL(data []byte) ([]model.Issue, error) {
 			// Skip malformed lines
 			continue
 		}
+
+		// Validate issue
+		if err := issue.Validate(); err != nil {
+			// Skip invalid issues
+			continue
+		}
+
 		issues = append(issues, issue)
 	}
 

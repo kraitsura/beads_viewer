@@ -201,23 +201,86 @@ func TestComment_Struct(t *testing.T) {
 	}
 }
 
-func TestIssue_UpdatedBeforeCreated(t *testing.T) {
-	created := time.Now()
-	updated := created.Add(-time.Hour)
-	issue := Issue{
-		ID:        "TEST-999",
-		Title:     "Backwards time",
-		Status:    StatusOpen,
-		IssueType: TypeTask,
-		CreatedAt: created,
-		UpdatedAt: updated,
+func TestIssue_Validate(t *testing.T) {
+	now := time.Now()
+	
+	tests := []struct {
+		name    string
+		issue   Issue
+		wantErr bool
+	}{
+		{
+			name: "Valid",
+			issue: Issue{
+				ID:        "TEST-1",
+				Title:     "Valid Issue",
+				Status:    StatusOpen,
+				IssueType: TypeBug,
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+			wantErr: false,
+		},
+		{
+			name: "Empty ID",
+			issue: Issue{
+				ID:        "",
+				Title:     "Valid Issue",
+				Status:    StatusOpen,
+				IssueType: TypeBug,
+			},
+			wantErr: true,
+		},
+		{
+			name: "Empty Title",
+			issue: Issue{
+				ID:        "TEST-1",
+				Title:     "",
+				Status:    StatusOpen,
+				IssueType: TypeBug,
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid Status",
+			issue: Issue{
+				ID:        "TEST-1",
+				Title:     "Valid Issue",
+				Status:    "invalid",
+				IssueType: TypeBug,
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid Type",
+			issue: Issue{
+				ID:        "TEST-1",
+				Title:     "Valid Issue",
+				Status:    StatusOpen,
+				IssueType: "invalid",
+			},
+			wantErr: true,
+		},
+		{
+			name: "UpdatedAt Before CreatedAt",
+			issue: Issue{
+				ID:        "TEST-1",
+				Title:     "Valid Issue",
+				Status:    StatusOpen,
+				IssueType: TypeBug,
+				CreatedAt: now,
+				UpdatedAt: now.Add(-1 * time.Hour),
+			},
+			wantErr: true,
+		},
 	}
 
-	if !issue.UpdatedAt.Before(issue.CreatedAt) {
-		t.Fatalf("sanity check failed: expected UpdatedAt before CreatedAt")
-	}
-	if issue.UpdatedAt.Before(issue.CreatedAt) {
-		// The struct has no validation method; document expected invariant for future validators
-		t.Log("UpdatedAt is before CreatedAt; future validation should reject this")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.issue.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Issue.Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }

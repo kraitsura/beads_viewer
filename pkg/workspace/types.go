@@ -101,7 +101,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("repo[%d]: path is required", i)
 		}
 
-		prefix := repo.GetPrefix()
+		prefix := strings.ToLower(repo.GetPrefix())
 		if seen[prefix] {
 			return fmt.Errorf("repo[%d]: duplicate prefix %q", i, prefix)
 		}

@@ -197,6 +197,16 @@ func TestConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "duplicate prefix case-insensitive",
+			config: workspace.Config{
+				Repos: []workspace.RepoConfig{
+					{Path: "api", Prefix: "App-"},
+					{Path: "web", Prefix: "app-"},
+				},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
