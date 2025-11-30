@@ -57,9 +57,13 @@ func (a *Analyzer) ComputeImpactScoresAt(now time.Time) []ImpactScore {
 
 	stats := a.Analyze()
 
+	// Get thread-safe copies of Phase 2 data
+	pageRank := stats.PageRank()
+	betweenness := stats.Betweenness()
+
 	// Find max values for normalization
-	maxPR := findMax(stats.PageRank)
-	maxBW := findMax(stats.Betweenness)
+	maxPR := findMax(pageRank)
+	maxBW := findMax(betweenness)
 	maxBlockers := findMaxInt(stats.InDegree)
 
 	var scores []ImpactScore
@@ -71,8 +75,8 @@ func (a *Analyzer) ComputeImpactScoresAt(now time.Time) []ImpactScore {
 		}
 
 		// Normalize metrics to 0-1
-		prNorm := normalize(stats.PageRank[id], maxPR)
-		bwNorm := normalize(stats.Betweenness[id], maxBW)
+		prNorm := normalize(pageRank[id], maxPR)
+		bwNorm := normalize(betweenness[id], maxBW)
 		blockerNorm := normalizeInt(stats.InDegree[id], maxBlockers)
 		stalenessNorm := computeStaleness(issue.UpdatedAt, now)
 		priorityNorm := computePriorityBoost(issue.Priority)
@@ -268,8 +272,10 @@ func (a *Analyzer) GenerateRecommendationsWithThresholds(thresholds Recommendati
 
 	for _, score := range scores {
 		rec := generateRecommendation(score, unblocksMap[score.IssueID], thresholds)
-		if rec != nil && rec.Confidence >= thresholds.MinConfidence {
-			recommendations = append(recommendations, *rec)
+		if rec != nil {
+			if rec.Confidence >= thresholds.MinConfidence {
+				recommendations = append(recommendations, *rec)
+			}
 		}
 	}
 

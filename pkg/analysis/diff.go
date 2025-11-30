@@ -319,14 +319,10 @@ func detectChanges(from, to model.Issue) []FieldChange {
 
 // compareCycles finds new and resolved cycles between stats
 func compareCycles(from, to *GraphStats) (newCycles, resolvedCycles [][]string) {
-	if from == nil && to == nil {
-		return nil, nil
-	}
-
 	// Normalize cycle representations for comparison
 	fromCycleSet := make(map[string][]string)
 	if from != nil {
-		for _, cycle := range from.Cycles {
+		for _, cycle := range from.Cycles() {
 			key := normalizeCycle(cycle)
 			fromCycleSet[key] = cycle
 		}
@@ -334,7 +330,7 @@ func compareCycles(from, to *GraphStats) (newCycles, resolvedCycles [][]string) 
 
 	toCycleSet := make(map[string][]string)
 	if to != nil {
-		for _, cycle := range to.Cycles {
+		for _, cycle := range to.Cycles() {
 			key := normalizeCycle(cycle)
 			toCycleSet[key] = cycle
 		}
@@ -403,9 +399,9 @@ func calculateMetricDeltas(from, to *Snapshot) MetricDeltas {
 
 	// Graph-level metrics from Stats
 	if from.Stats != nil && to.Stats != nil {
-		deltas.CycleCount = len(to.Stats.Cycles) - len(from.Stats.Cycles)
-		deltas.AvgPageRank = avgMapValue(to.Stats.PageRank) - avgMapValue(from.Stats.PageRank)
-		deltas.AvgBetweenness = avgMapValue(to.Stats.Betweenness) - avgMapValue(from.Stats.Betweenness)
+		deltas.CycleCount = len(to.Stats.Cycles()) - len(from.Stats.Cycles())
+		deltas.AvgPageRank = avgMapValue(to.Stats.PageRank()) - avgMapValue(from.Stats.PageRank())
+		deltas.AvgBetweenness = avgMapValue(to.Stats.Betweenness()) - avgMapValue(from.Stats.Betweenness())
 	}
 
 	return deltas
