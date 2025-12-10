@@ -123,6 +123,7 @@ type Model struct {
 	isActionableView bool
 	showDetails      bool
 	showHelp         bool
+	helpScroll       int // Scroll offset for help overlay
 	showQuitConfirm  bool
 	ready            bool
 	width            int
@@ -648,11 +649,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// If help is showing, any key (except ?/F1) dismisses it
+		// If help is showing, handle navigation or dismiss
 		if m.focused == focusHelp {
-			m.showHelp = false
-			m.focused = focusList
-			return m, nil
+			switch msg.String() {
+			case "j", "down":
+				m.helpScroll++
+				return m, nil
+			case "k", "up":
+				if m.helpScroll > 0 {
+					m.helpScroll--
+				}
+				return m, nil
+			case "ctrl+d":
+				m.helpScroll += 10
+				return m, nil
+			case "ctrl+u":
+				m.helpScroll -= 10
+				if m.helpScroll < 0 {
+					m.helpScroll = 0
+				}
+				return m, nil
+			case "home", "g":
+				m.helpScroll = 0
+				return m, nil
+			default:
+				// Any other key dismisses help
+				m.showHelp = false
+				m.helpScroll = 0
+				m.focused = focusList
+				return m, nil
+			}
 		}
 
 		// Handle time-travel input first (before global keys intercept letters)
@@ -1612,16 +1638,93 @@ func (m Model) renderHelpOverlay() string {
 		sb.WriteString(keyStyle.Render(s.key) + descStyle.Render(s.desc) + "\n")
 	}
 
-	sb.WriteString("\n")
-	sb.WriteString(t.Renderer.NewStyle().Foreground(t.Secondary).Italic(true).Render("Press any key to close"))
+	// Split content into lines for scrolling
+	helpContent := sb.String()
+	lines := strings.Split(helpContent, "\n")
+
+	// Calculate fixed width based on widest line (ensures box doesn't resize on scroll)
+	fixedWidth := 0
+	for _, line := range lines {
+		w := lipgloss.Width(line)
+		if w > fixedWidth {
+			fixedWidth = w
+		}
+	}
+
+	// Calculate visible area (leave room for nav hints at bottom)
+	maxVisibleLines := m.height - 12
+	if maxVisibleLines < 10 {
+		maxVisibleLines = 10
+	}
+
+	// Clamp scroll position
+	totalLines := len(lines)
+	maxScroll := totalLines - maxVisibleLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollPos := m.helpScroll
+	if scrollPos > maxScroll {
+		scrollPos = maxScroll
+	}
+
+	// Get visible lines and pad to fixed width
+	endLine := scrollPos + maxVisibleLines
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+	visibleLines := lines[scrollPos:endLine]
+	// Pad each line to fixed width to maintain consistent box size
+	for i, line := range visibleLines {
+		w := lipgloss.Width(line)
+		if w < fixedWidth {
+			visibleLines[i] = line + strings.Repeat(" ", fixedWidth-w)
+		}
+	}
+	visibleContent := strings.Join(visibleLines, "\n")
+
+	// Build elegant navigation hint footer
+	dimStyle := t.Renderer.NewStyle().
+		Foreground(lipgloss.AdaptiveColor{Light: "#999999", Dark: "#666666"})
+	navLabelStyle := t.Renderer.NewStyle().
+		Foreground(lipgloss.AdaptiveColor{Light: "#666666", Dark: "#888888"})
+
+	// Minimal nav hints with pipe separators
+	navBar := dimStyle.Render("↑↓") + navLabelStyle.Render(" scroll") +
+		dimStyle.Render(" │ ") +
+		dimStyle.Render("q") + navLabelStyle.Render(" close")
+
+	// Fixed-width scroll position indicator (visual bar)
+	scrollBar := ""
+	if totalLines > maxVisibleLines {
+		barWidth := 10
+		filledPos := 0
+		if maxScroll > 0 {
+			filledPos = (scrollPos * (barWidth - 1)) / maxScroll
+		}
+		var bar strings.Builder
+		bar.WriteString(dimStyle.Render(" │ "))
+		for i := 0; i < barWidth; i++ {
+			if i == filledPos {
+				bar.WriteString(dimStyle.Render("●"))
+			} else {
+				bar.WriteString(dimStyle.Render("─"))
+			}
+		}
+		scrollBar = bar.String()
+	}
+
+	navFooter := "\n\n" + t.Renderer.NewStyle().
+		Align(lipgloss.Center).
+		Width(fixedWidth).
+		Render(navBar+scrollBar)
 
 	// Center the help content
-	helpContent := sb.String()
 	helpBox := t.Renderer.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Primary).
 		Padding(1, 3).
-		Render(helpContent)
+		Render(visibleContent + navFooter)
 
 	// Center in viewport
 	return lipgloss.Place(
