@@ -10,10 +10,24 @@ Use beads as the primary task tracker for this project. Do NOT use TodoWrite too
 
 **Find work:**
 ```bash
+# IMPORTANT: Use bash `bd ready` command, NOT the MCP plugin for ready queries
 bd ready                              # Show issues ready to work (no blockers)
-bd list --status=open                 # All open issues
-bd show <id>                          # Detailed view with dependencies
+bd ready --label=<scope>              # Filter by label (e.g., --label=ui, --label=api)
+bd list --status=open --label=<scope> # Scoped open issues (prefer over unfiltered)
 ```
+
+**Get condensed overviews (prefer bv for insights):**
+```bash
+bv --robot-plan                       # Fast actionable items, execution plan
+bv --robot-priority                   # Priority recommendations
+bv --robot-insights                   # Full graph metrics (slower)
+```
+
+**View specific issue details:**
+```bash
+bd show <id>                          # ALWAYS specify an ID - never run bare `bd show`
+```
+> **Context Warning:** Never use `bd show` without an issue ID. It dumps all issues and eats context. Always filter first with `bd list --label=` or `bv --robot-*`, then `bd show <specific-id>`.
 
 **Claim and complete work:**
 ```bash
