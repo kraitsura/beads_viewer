@@ -30,3 +30,4 @@ beads_viewer_graph*.html
 test-results/
 
 .worktrees/
+label_dashboard_dump.txt
