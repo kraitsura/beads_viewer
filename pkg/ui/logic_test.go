@@ -250,7 +250,7 @@ func TestLabelDashboardToggleViewTypeViaModel(t *testing.T) {
 	}
 	m.issueMap = issueMap
 	dashboard := NewLabelDashboardModel("test-label", issues, issueMap, m.theme)
-	m.labelDashboard = &dashboard
+	m.labelDashboard = dashboard
 	m.showLabelDashboard = true
 	m.focused = focusLabelDashboard
 
@@ -357,7 +357,7 @@ func TestLabelDashboardToggleViaFullUpdateCycle(t *testing.T) {
 	}
 	m.issueMap = issueMap
 	dashboard2 := NewLabelDashboardModel("test-label", issues, issueMap, m.theme)
-	m.labelDashboard = &dashboard2
+	m.labelDashboard = dashboard2
 	m.labelDashboard.SetSize(80, 40)
 	m.showLabelDashboard = true
 	m.focused = focusLabelDashboard
