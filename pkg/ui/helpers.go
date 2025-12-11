@@ -234,6 +234,22 @@ func GetStatusIcon(s string) string {
 	}
 }
 
+// GetStatusBadge returns a formatted status badge for markdown display
+func GetStatusBadge(s string) string {
+	switch s {
+	case "open":
+		return "🟢 Open"
+	case "in_progress":
+		return "🔵 In Progress"
+	case "blocked":
+		return "🔴 Blocked"
+	case "closed":
+		return "⚫ Closed"
+	default:
+		return s
+	}
+}
+
 // GetPriorityIcon returns the emoji for a priority level
 func GetPriorityIcon(priority int) string {
 	switch priority {

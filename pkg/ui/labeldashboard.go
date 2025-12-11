@@ -660,7 +660,7 @@ func (m *LabelDashboardModel) View() string {
 	// Footer
 	lines = append(lines, "")
 	footerStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Italic(true)
-	lines = append(lines, footerStyle.Render("j/k: nav • d: depth • tab: next section • enter: jump • esc: back"))
+	lines = append(lines, footerStyle.Render("j/k: nav • d: depth • p: copy • tab: detail • n/N: section • enter: jump • esc: back"))
 
 	return strings.Join(lines, "\n")
 }

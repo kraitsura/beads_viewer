@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,27 +15,37 @@ import (
 
 // LabelItem represents a selectable label or epic in the selector
 type LabelItem struct {
-	Type        string  // "label" or "epic"
-	Value       string  // label name or epic ID
-	Title       string  // display text (same as Value for labels, title for epics)
-	IssueCount  int     // total issues with this label
-	ClosedCount int     // closed issues
-	Progress    float64 // completion percentage
-	IsPinned    bool    // is this item pinned
+	Type         string  // "label" or "epic"
+	Value        string  // label name or epic ID
+	Title        string  // display text (same as Value for labels, title for epics)
+	IssueCount   int     // total issues with this label
+	ClosedCount  int     // closed issues
+	Progress     float64 // completion percentage
+	IsPinned     bool    // is this item pinned
+	OverlapCount int     // issues overlapping with scope label (when scope is set)
 }
 
 // LabelSelectorModel represents the label selector overlay
 type LabelSelectorModel struct {
 	// Data
-	allItems      []LabelItem // All available items (labels + epics)
-	filteredItems []LabelItem // Filtered by search
-	pinnedItems   []LabelItem // Pinned labels (persisted)
-	recentItems   []LabelItem // Recently selected labels
+	allItems      []LabelItem   // All available items (labels + epics)
+	filteredItems []LabelItem   // Filtered by search
+	pinnedItems   []LabelItem   // Pinned labels (persisted)
+	recentItems   []LabelItem   // Recently selected labels
+	issues        []model.Issue // Reference to issues for scope filtering
 
 	// UI State
-	searchInput   textinput.Model
-	selectedIndex int
+	searchInput    textinput.Model
+	selectedIndex  int
 	currentSection int // 0=pinned, 1=recent, 2=epics, 3=labels (or search results)
+
+	// Scope state (multi-scope)
+	scopeLabels []string // Currently set scope labels (empty = no scope)
+	scopeMode   bool     // True when in scope mode
+
+	// Mode state (vim-style)
+	insertMode     bool // True when in insert mode (typing into search)
+	scopeAddMode   bool // True when insert mode was triggered by 's' (adding to scope)
 
 	// Dimensions
 	width  int
@@ -44,6 +55,7 @@ type LabelSelectorModel struct {
 	// Selection result
 	confirmed    bool
 	selectedItem *LabelItem
+	scopedLabels []string // When scope is set and item selected, both labels returned
 }
 
 // NewLabelSelectorModel creates a new label selector
@@ -128,6 +140,7 @@ func NewLabelSelectorModel(issues []model.Issue, theme Theme) LabelSelectorModel
 	return LabelSelectorModel{
 		allItems:      allItems,
 		filteredItems: allItems,
+		issues:        issues,
 		searchInput:   ti,
 		selectedIndex: 0,
 		theme:         theme,
@@ -169,23 +182,53 @@ func (m *LabelSelectorModel) SetSize(width, height int) {
 
 // Update handles input and returns whether the model changed
 func (m *LabelSelectorModel) Update(key string) (handled bool) {
+	// Handle insert mode (all keys go to search except esc/enter)
+	if m.insertMode {
+		return m.updateInsertMode(key)
+	}
+	return m.updateNormalMode(key)
+}
+
+// updateInsertMode handles keys when in insert/search mode
+func (m *LabelSelectorModel) updateInsertMode(key string) bool {
 	switch key {
-	case "up", "k":
-		m.moveUp()
-		return true
-	case "down", "j":
-		m.moveDown()
+	case "esc":
+		// Exit insert mode, return to normal
+		m.insertMode = false
+		m.scopeAddMode = false
+		m.searchInput.SetValue("")
+		// Refilter based on current scope
+		if m.scopeMode {
+			m.filterByScope()
+		} else {
+			m.filteredItems = m.allItems
+		}
+		m.selectedIndex = 0
 		return true
 	case "enter":
 		if len(m.filteredItems) > 0 && m.selectedIndex < len(m.filteredItems) {
 			item := m.filteredItems[m.selectedIndex]
+
+			if m.scopeAddMode && item.Type == "label" {
+				// Adding to scope - add label and stay in selector
+				m.addToScope(item.Value)
+				m.insertMode = false
+				m.scopeAddMode = false
+				m.searchInput.SetValue("")
+				// Don't confirm - stay in selector
+				return true
+			}
+
+			// Normal selection - confirm and close
 			m.selectedItem = &item
+			// Build scoped labels: all scope labels + selected label
+			if m.scopeMode && len(m.scopeLabels) > 0 && item.Type == "label" {
+				m.scopedLabels = make([]string, 0, len(m.scopeLabels)+1)
+				m.scopedLabels = append(m.scopedLabels, m.scopeLabels...)
+				m.scopedLabels = append(m.scopedLabels, item.Value)
+			}
 			m.confirmed = true
 		}
-		return true
-	case "esc":
-		m.confirmed = false
-		m.selectedItem = nil
 		return true
 	case "backspace":
 		if len(m.searchInput.Value()) > 0 {
@@ -193,13 +236,81 @@ func (m *LabelSelectorModel) Update(key string) (handled bool) {
 			m.filterItems()
 		}
 		return true
+	case "up":
+		m.moveUp()
+		return true
+	case "down":
+		m.moveDown()
+		return true
 	default:
-		// Handle text input for single characters
+		// All single characters go to search input (including j, k, s, q)
 		if len(key) == 1 {
 			m.searchInput.SetValue(m.searchInput.Value() + key)
 			m.filterItems()
 			return true
 		}
+	}
+	return false
+}
+
+// updateNormalMode handles keys when in normal/navigation mode
+func (m *LabelSelectorModel) updateNormalMode(key string) bool {
+	switch key {
+	case "up", "k":
+		m.moveUp()
+		return true
+	case "down", "j":
+		m.moveDown()
+		return true
+	case "i", "/":
+		// Enter insert mode (for searching)
+		m.insertMode = true
+		m.scopeAddMode = false
+		return true
+	case "s":
+		// Enter insert mode for scope adding
+		m.insertMode = true
+		m.scopeAddMode = true
+		return true
+	case "enter":
+		if len(m.filteredItems) > 0 && m.selectedIndex < len(m.filteredItems) {
+			item := m.filteredItems[m.selectedIndex]
+			m.selectedItem = &item
+			// Build scoped labels: all scope labels + selected label
+			if m.scopeMode && len(m.scopeLabels) > 0 && item.Type == "label" {
+				m.scopedLabels = make([]string, 0, len(m.scopeLabels)+1)
+				m.scopedLabels = append(m.scopedLabels, m.scopeLabels...)
+				m.scopedLabels = append(m.scopedLabels, item.Value)
+			}
+			m.confirmed = true
+		}
+		return true
+	case "esc":
+		// If in scope mode, clear scope first
+		if m.scopeMode {
+			m.clearScope()
+			return true
+		}
+		m.confirmed = false
+		m.selectedItem = nil
+		return true
+	case "backspace":
+		// Clear search in normal mode, or remove last scope if search empty
+		if len(m.searchInput.Value()) > 0 {
+			m.searchInput.SetValue("")
+			m.filterItems()
+		} else if len(m.scopeLabels) > 0 {
+			// Remove last scope label
+			m.scopeLabels = m.scopeLabels[:len(m.scopeLabels)-1]
+			if len(m.scopeLabels) == 0 {
+				m.scopeMode = false
+				m.filteredItems = m.allItems
+			} else {
+				m.filterByScope()
+			}
+			m.selectedIndex = 0
+		}
+		return true
 	}
 	return false
 }
@@ -275,13 +386,171 @@ func (m *LabelSelectorModel) SelectedItem() *LabelItem {
 	return m.selectedItem
 }
 
+// ScopedLabels returns the scoped labels when scope mode is active
+func (m *LabelSelectorModel) ScopedLabels() []string {
+	return m.scopedLabels
+}
+
+// ScopeLabels returns all current scope labels
+func (m *LabelSelectorModel) ScopeLabels() []string {
+	return m.scopeLabels
+}
+
+// IsScopeMode returns true if scope mode is active
+func (m *LabelSelectorModel) IsScopeMode() bool {
+	return m.scopeMode
+}
+
+// addToScope adds a label to the scope set (no toggle, just add if not present)
+func (m *LabelSelectorModel) addToScope(label string) {
+	// Check if already in scope
+	for _, l := range m.scopeLabels {
+		if l == label {
+			// Already in scope, just refilter
+			m.filterByScope()
+			return
+		}
+	}
+
+	// Add to scope
+	m.scopeLabels = append(m.scopeLabels, label)
+	m.scopeMode = true
+	m.filterByScope()
+}
+
+// toggleScope toggles a label in/out of the scope set
+func (m *LabelSelectorModel) toggleScope(label string) {
+	// Check if already in scope
+	idx := -1
+	for i, l := range m.scopeLabels {
+		if l == label {
+			idx = i
+			break
+		}
+	}
+
+	if idx >= 0 {
+		// Remove from scope
+		m.scopeLabels = append(m.scopeLabels[:idx], m.scopeLabels[idx+1:]...)
+		if len(m.scopeLabels) == 0 {
+			m.scopeMode = false
+		}
+	} else {
+		// Add to scope
+		m.scopeLabels = append(m.scopeLabels, label)
+		m.scopeMode = true
+	}
+
+	m.searchInput.SetValue("")
+	if m.scopeMode {
+		m.filterByScope()
+	} else {
+		m.filteredItems = m.allItems
+		m.selectedIndex = 0
+	}
+}
+
+// clearScope clears all scopes and resets to full list
+func (m *LabelSelectorModel) clearScope() {
+	m.scopeLabels = nil
+	m.scopeMode = false
+	m.scopedLabels = nil
+	m.searchInput.SetValue("")
+	m.filteredItems = m.allItems
+	m.selectedIndex = 0
+}
+
+// filterByScope filters to show only labels that co-occur with ALL scope labels
+func (m *LabelSelectorModel) filterByScope() {
+	if len(m.scopeLabels) == 0 {
+		m.filteredItems = m.allItems
+		return
+	}
+
+	// Build set of scope labels for quick lookup
+	scopeSet := make(map[string]bool)
+	for _, l := range m.scopeLabels {
+		scopeSet[l] = true
+	}
+
+	// Find all issues that have ALL scope labels
+	scopeIssues := make(map[string]bool)
+	for _, issue := range m.issues {
+		hasAll := true
+		for _, scopeLabel := range m.scopeLabels {
+			found := false
+			for _, label := range issue.Labels {
+				if label == scopeLabel {
+					found = true
+					break
+				}
+			}
+			if !found {
+				hasAll = false
+				break
+			}
+		}
+		if hasAll {
+			scopeIssues[issue.ID] = true
+		}
+	}
+
+	// Count co-occurring labels (excluding scope labels)
+	labelOverlap := make(map[string]int)
+	for _, issue := range m.issues {
+		if !scopeIssues[issue.ID] {
+			continue
+		}
+		for _, label := range issue.Labels {
+			if !scopeSet[label] {
+				labelOverlap[label]++
+			}
+		}
+	}
+
+	// Build filtered items with overlap counts
+	var filtered []LabelItem
+	for _, item := range m.allItems {
+		if item.Type == "label" && !scopeSet[item.Value] {
+			if overlap, ok := labelOverlap[item.Value]; ok && overlap > 0 {
+				itemCopy := item
+				itemCopy.OverlapCount = overlap
+				filtered = append(filtered, itemCopy)
+			}
+		}
+	}
+
+	// Sort by overlap count (descending)
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].OverlapCount > filtered[j].OverlapCount
+	})
+
+	m.filteredItems = filtered
+	m.selectedIndex = 0
+}
+
 // Reset clears the selection state for reuse
 func (m *LabelSelectorModel) Reset() {
 	m.confirmed = false
 	m.selectedItem = nil
+	m.scopedLabels = nil
+	m.scopeLabels = nil
+	m.scopeMode = false
 	m.searchInput.SetValue("")
 	m.filteredItems = m.allItems
 	m.selectedIndex = 0
+	m.insertMode = false
+	m.scopeAddMode = false
+}
+
+// IsInsertMode returns true if in insert/search mode
+func (m *LabelSelectorModel) IsInsertMode() bool {
+	return m.insertMode
+}
+
+// IsScopeAddMode returns true if in scope-adding insert mode
+func (m *LabelSelectorModel) IsScopeAddMode() bool {
+	return m.scopeAddMode
 }
 
 // View renders the label selector overlay
@@ -305,19 +574,50 @@ func (m *LabelSelectorModel) View() string {
 	titleStyle := t.Renderer.NewStyle().
 		Foreground(t.Primary).
 		Bold(true)
-	lines = append(lines, titleStyle.Render("Select Label or Epic"))
+
+	if m.scopeMode {
+		lines = append(lines, titleStyle.Render("Select Label (within scope)"))
+	} else {
+		lines = append(lines, titleStyle.Render("Select Label or Epic"))
+	}
+
+	// Scope indicator - sleek inline chips
+	if m.scopeMode && len(m.scopeLabels) > 0 {
+		scopeIcon := t.Renderer.NewStyle().Foreground(t.Primary).Render("⊕")
+		chipStyle := t.Renderer.NewStyle().
+			Foreground(t.Primary).
+			Bold(true)
+		sepStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Render(" ∩ ")
+
+		var chips []string
+		for _, label := range m.scopeLabels {
+			chips = append(chips, chipStyle.Render(label))
+		}
+		scopeLine := scopeIcon + " " + strings.Join(chips, sepStyle)
+		countStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Italic(true)
+		scopeLine += countStyle.Render(fmt.Sprintf("  (%d)", len(m.filteredItems)))
+		lines = append(lines, scopeLine)
+	}
 	lines = append(lines, "")
 
-	// Search input
+	// Search input (highlighted when in insert mode)
+	inputBorderColor := t.Secondary
+	if m.insertMode {
+		inputBorderColor = t.Primary
+	}
 	inputStyle := t.Renderer.NewStyle().
 		Foreground(t.Base.GetForeground()).
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(t.Secondary).
+		BorderForeground(inputBorderColor).
 		Padding(0, 1).
 		Width(contentWidth - 2)
 
 	searchValue := m.searchInput.Value()
-	if searchValue == "" {
+	if m.insertMode {
+		// Show cursor in insert mode
+		cursorStyle := t.Renderer.NewStyle().Background(t.Primary).Foreground(t.Base.GetBackground())
+		searchValue = searchValue + cursorStyle.Render(" ")
+	} else if searchValue == "" {
 		searchValue = t.Renderer.NewStyle().Foreground(t.Subtext).Render(m.searchInput.Placeholder)
 	}
 	lines = append(lines, inputStyle.Render(searchValue))
@@ -373,7 +673,11 @@ func (m *LabelSelectorModel) View() string {
 			sectionStyle := t.Renderer.NewStyle().
 				Foreground(t.Secondary).
 				Bold(true)
-			lines = append(lines, sectionStyle.Render("LABELS"))
+			if m.scopeMode {
+				lines = append(lines, sectionStyle.Render("MATCHING LABELS (within scope)"))
+			} else {
+				lines = append(lines, sectionStyle.Render("LABELS"))
+			}
 
 			for _, item := range labels {
 				if globalIdx >= maxVisible {
@@ -394,12 +698,33 @@ func (m *LabelSelectorModel) View() string {
 		}
 	}
 
-	// Footer with keybindings
+	// Footer with keybindings (mode-aware)
 	lines = append(lines, "")
 	footerStyle := t.Renderer.NewStyle().
 		Foreground(t.Subtext).
 		Italic(true)
-	lines = append(lines, footerStyle.Render("j/k: navigate • enter: select • esc: cancel"))
+	modeStyle := t.Renderer.NewStyle().
+		Foreground(t.Primary).
+		Bold(true)
+
+	if m.insertMode {
+		// Insert mode footer - different hint for scope adding vs searching
+		if m.scopeAddMode {
+			modeIndicator := modeStyle.Render("SCOPE+")
+			lines = append(lines, modeIndicator+" "+footerStyle.Render("type to filter • ↑↓: nav • enter: add scope • esc: cancel"))
+		} else {
+			modeIndicator := modeStyle.Render("SEARCH")
+			lines = append(lines, modeIndicator+" "+footerStyle.Render("type to filter • ↑↓: nav • enter: select • esc: cancel"))
+		}
+	} else if m.scopeMode {
+		// Scope mode footer (normal mode with scopes set)
+		modeIndicator := modeStyle.Render("SCOPE")
+		lines = append(lines, modeIndicator+" "+footerStyle.Render("j/k: nav • s: +scope • ⌫: -scope • enter: select • esc: clear • q: close"))
+	} else {
+		// Normal mode footer
+		modeIndicator := modeStyle.Render("NORMAL")
+		lines = append(lines, modeIndicator+" "+footerStyle.Render("j/k: nav • i: search • s: +scope • enter: select • q: close"))
+	}
 
 	content := strings.Join(lines, "\n")
 
@@ -447,24 +772,30 @@ func (m *LabelSelectorModel) renderItem(item LabelItem, isSelected bool, maxWidt
 
 	// Truncate title if needed
 	title := item.Title
-	maxTitleLen := maxWidth - 25 // Leave room for progress bar
+	maxTitleLen := maxWidth - 25 // Leave room for progress bar or overlap
 	if len(title) > maxTitleLen {
 		title = title[:maxTitleLen-1] + "…"
 	}
 
-	// Progress bar
-	progressBar := m.renderProgressBar(item.Progress, item.ClosedCount, item.IssueCount)
-
 	// Build the line
 	name := prefix + icon + title
 
-	// Pad to align progress bars
-	padding := maxWidth - len(name) - len(progressBar) - 2
+	// Show overlap count when in scope mode, otherwise progress bar
+	var suffix string
+	if m.scopeMode && item.OverlapCount > 0 {
+		overlapStyle := t.Renderer.NewStyle().Foreground(t.InProgress)
+		suffix = overlapStyle.Render("(" + strconv.Itoa(item.OverlapCount) + " overlap)")
+	} else {
+		suffix = m.renderProgressBar(item.Progress, item.ClosedCount, item.IssueCount)
+	}
+
+	// Pad to align
+	padding := maxWidth - len(name) - len(suffix) - 2
 	if padding < 1 {
 		padding = 1
 	}
 
-	return nameStyle.Render(name) + strings.Repeat(" ", padding) + progressBar
+	return nameStyle.Render(name) + strings.Repeat(" ", padding) + suffix
 }
 
 func (m *LabelSelectorModel) renderProgressBar(progress float64, closed, total int) string {
