@@ -193,17 +193,11 @@ func (m *LabelSelectorModel) Update(key string) (handled bool) {
 func (m *LabelSelectorModel) updateInsertMode(key string) bool {
 	switch key {
 	case "esc":
-		// Exit insert mode, return to normal
+		// Exit insert mode, return to normal - preserve search text and filtered results
 		m.insertMode = false
 		m.scopeAddMode = false
-		m.searchInput.SetValue("")
-		// Refilter based on current scope
-		if m.scopeMode {
-			m.filterByScope()
-		} else {
-			m.filteredItems = m.allItems
-		}
-		m.selectedIndex = 0
+		// Keep search text and filtered items so user can resume where they left off
+		// User can press backspace in normal mode to clear search if desired
 		return true
 	case "enter":
 		if len(m.filteredItems) > 0 && m.selectedIndex < len(m.filteredItems) {
