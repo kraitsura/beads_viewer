@@ -46,6 +46,7 @@ type LabelSelectorModel struct {
 	// Mode state (vim-style)
 	insertMode     bool // True when in insert mode (typing into search)
 	scopeAddMode   bool // True when insert mode was triggered by 's' (adding to scope)
+	reviewMode     bool // True when searching for issue IDs (triggered by 'r')
 
 	// Dimensions
 	width  int
@@ -67,11 +68,8 @@ func NewLabelSelectorModel(issues []model.Issue, theme Theme) LabelSelectorModel
 	ti.CharLimit = 64
 	ti.Width = 40
 
-	// Extract unique labels with counts
-	labelCounts := make(map[string]struct {
-		total  int
-		closed int
-	})
+	// Collect unique label names and epics
+	labelSet := make(map[string]bool)
 	var epics []LabelItem
 
 	for _, issue := range issues {
@@ -93,7 +91,15 @@ func NewLabelSelectorModel(issues []model.Issue, theme Theme) LabelSelectorModel
 			})
 		}
 
-		// Collect labels
+		// Collect unique label names
+		for _, label := range issue.Labels {
+			labelSet[label] = true
+		}
+	}
+
+	// Build label items with direct counts only (no descendants)
+	labelCounts := make(map[string]struct{ total, closed int })
+	for _, issue := range issues {
 		for _, label := range issue.Labels {
 			counts := labelCounts[label]
 			counts.total++
@@ -104,9 +110,9 @@ func NewLabelSelectorModel(issues []model.Issue, theme Theme) LabelSelectorModel
 		}
 	}
 
-	// Convert labels to items
 	var labels []LabelItem
-	for name, counts := range labelCounts {
+	for name := range labelSet {
+		counts := labelCounts[name]
 		progress := 0.0
 		if counts.total > 0 {
 			progress = float64(counts.closed) / float64(counts.total)
@@ -149,16 +155,42 @@ func NewLabelSelectorModel(issues []model.Issue, theme Theme) LabelSelectorModel
 	}
 }
 
-// countEpicChildren counts total and closed children for an epic
+// countEpicChildren counts total and closed descendants for an epic (recursive)
 func countEpicChildren(epicID string, issues []model.Issue) (total, closed int) {
-	for _, issue := range issues {
-		for _, dep := range issue.Dependencies {
-			if dep.DependsOnID == epicID && dep.Type == model.DepParentChild {
+	children, issueStatus := buildChildrenMap(issues)
+
+	// BFS to count all descendants
+	visited := make(map[string]bool)
+	queue := []string{epicID}
+	visited[epicID] = true
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		for _, childID := range children[current] {
+			if !visited[childID] {
+				visited[childID] = true
 				total++
-				if issue.Status == model.StatusClosed {
+				if issueStatus[childID] == model.StatusClosed {
 					closed++
 				}
-				break
+				queue = append(queue, childID)
+			}
+		}
+	}
+	return
+}
+
+// buildChildrenMap builds parent -> children map and issue status map for efficient traversal
+func buildChildrenMap(issues []model.Issue) (children map[string][]string, issueStatus map[string]model.Status) {
+	children = make(map[string][]string)
+	issueStatus = make(map[string]model.Status)
+	for _, issue := range issues {
+		issueStatus[issue.ID] = issue.Status
+		for _, dep := range issue.Dependencies {
+			if dep.Type == model.DepParentChild {
+				children[dep.DependsOnID] = append(children[dep.DependsOnID], issue.ID)
 			}
 		}
 	}
@@ -193,9 +225,16 @@ func (m *LabelSelectorModel) Update(key string) (handled bool) {
 func (m *LabelSelectorModel) updateInsertMode(key string) bool {
 	switch key {
 	case "esc":
-		// Exit insert mode, return to normal - preserve search text and filtered results
+		// Exit insert mode, return to normal
 		m.insertMode = false
 		m.scopeAddMode = false
+		// For review mode, clear search and reset to all items
+		if m.reviewMode {
+			m.reviewMode = false
+			m.searchInput.SetValue("")
+			m.filteredItems = m.allItems
+			m.selectedIndex = 0
+		}
 		// Keep search text and filtered items so user can resume where they left off
 		// User can press backspace in normal mode to clear search if desired
 		return true
@@ -266,6 +305,14 @@ func (m *LabelSelectorModel) updateNormalMode(key string) bool {
 		m.insertMode = true
 		m.scopeAddMode = true
 		return true
+	case "r":
+		// Enter insert mode for review/ID-based search
+		m.insertMode = true
+		m.reviewMode = true
+		m.searchInput.SetValue("")
+		m.filteredItems = nil // Clear filtered items until user types
+		m.selectedIndex = 0
+		return true
 	case "enter":
 		if len(m.filteredItems) > 0 && m.selectedIndex < len(m.filteredItems) {
 			item := m.filteredItems[m.selectedIndex]
@@ -329,6 +376,13 @@ func (m *LabelSelectorModel) moveDown() {
 
 func (m *LabelSelectorModel) filterItems() {
 	query := strings.TrimSpace(m.searchInput.Value())
+
+	// Review mode: search by issue ID prefix
+	if m.reviewMode {
+		m.filterByIssueID(query)
+		return
+	}
+
 	if query == "" {
 		m.filteredItems = m.allItems
 		m.selectedIndex = 0
@@ -362,6 +416,58 @@ func (m *LabelSelectorModel) filterItems() {
 	})
 
 	// Reset selection to top
+	m.selectedIndex = 0
+}
+
+// filterByIssueID filters by issue ID prefix or title substring match (for review mode)
+func (m *LabelSelectorModel) filterByIssueID(query string) {
+	if query == "" {
+		m.filteredItems = nil
+		m.selectedIndex = 0
+		return
+	}
+
+	queryLower := strings.ToLower(query)
+	var idMatches, titleMatches []LabelItem
+	seen := make(map[string]bool)
+
+	for _, issue := range m.issues {
+		idLower := strings.ToLower(issue.ID)
+		titleLower := strings.ToLower(issue.Title)
+
+		// ID prefix match takes priority
+		if strings.HasPrefix(idLower, queryLower) {
+			idMatches = append(idMatches, LabelItem{
+				Type:       "bead",
+				Value:      issue.ID,
+				Title:      issue.Title,
+				IssueCount: 1,
+			})
+			seen[issue.ID] = true
+		} else if strings.Contains(titleLower, queryLower) {
+			// Title substring match (only if not already matched by ID)
+			titleMatches = append(titleMatches, LabelItem{
+				Type:       "bead",
+				Value:      issue.ID,
+				Title:      issue.Title,
+				IssueCount: 1,
+			})
+			seen[issue.ID] = true
+		}
+	}
+
+	// Sort ID matches by ID
+	sort.Slice(idMatches, func(i, j int) bool {
+		return idMatches[i].Value < idMatches[j].Value
+	})
+
+	// Sort title matches by title
+	sort.Slice(titleMatches, func(i, j int) bool {
+		return titleMatches[i].Title < titleMatches[j].Title
+	})
+
+	// Combine: ID matches first, then title matches
+	m.filteredItems = append(idMatches, titleMatches...)
 	m.selectedIndex = 0
 }
 
@@ -535,6 +641,12 @@ func (m *LabelSelectorModel) Reset() {
 	m.selectedIndex = 0
 	m.insertMode = false
 	m.scopeAddMode = false
+	m.reviewMode = false
+}
+
+// IsReviewMode returns true if in review/ID search mode
+func (m *LabelSelectorModel) IsReviewMode() bool {
+	return m.reviewMode
 }
 
 // IsInsertMode returns true if in insert/search mode
@@ -632,11 +744,14 @@ func (m *LabelSelectorModel) View() string {
 		lines = append(lines, emptyStyle.Render("  No matching labels or epics"))
 	} else {
 		// Group items by type for display
-		var epics, labels []LabelItem
+		var beads, epics, labels []LabelItem
 		for _, item := range m.filteredItems {
-			if item.Type == "epic" {
+			switch item.Type {
+			case "bead":
+				beads = append(beads, item)
+			case "epic":
 				epics = append(epics, item)
-			} else {
+			default:
 				labels = append(labels, item)
 			}
 		}
@@ -644,8 +759,26 @@ func (m *LabelSelectorModel) View() string {
 		// Track global index for selection
 		globalIdx := 0
 
+		// Show beads/issues section if any (from review mode)
+		if len(beads) > 0 {
+			sectionStyle := t.Renderer.NewStyle().
+				Foreground(t.Secondary).
+				Bold(true)
+			lines = append(lines, sectionStyle.Render("ISSUES"))
+
+			for _, item := range beads {
+				if globalIdx >= maxVisible {
+					break
+				}
+				line := m.renderItem(item, globalIdx == m.selectedIndex, contentWidth)
+				lines = append(lines, line)
+				globalIdx++
+			}
+			lines = append(lines, "")
+		}
+
 		// Show epics section if any
-		if len(epics) > 0 {
+		if len(epics) > 0 && globalIdx < maxVisible {
 			sectionStyle := t.Renderer.NewStyle().
 				Foreground(t.Secondary).
 				Bold(true)
@@ -702,10 +835,13 @@ func (m *LabelSelectorModel) View() string {
 		Bold(true)
 
 	if m.insertMode {
-		// Insert mode footer - different hint for scope adding vs searching
+		// Insert mode footer - different hint for scope adding vs searching vs review
 		if m.scopeAddMode {
 			modeIndicator := modeStyle.Render("SCOPE+")
 			lines = append(lines, modeIndicator+" "+footerStyle.Render("type to filter • ↑↓: nav • enter: add scope • esc: cancel"))
+		} else if m.reviewMode {
+			modeIndicator := modeStyle.Render("REVIEW")
+			lines = append(lines, modeIndicator+" "+footerStyle.Render("type ID or title • ↑↓: nav • enter: view bead • esc: cancel"))
 		} else {
 			modeIndicator := modeStyle.Render("SEARCH")
 			lines = append(lines, modeIndicator+" "+footerStyle.Render("type to filter • ↑↓: nav • enter: select • esc: cancel"))
@@ -717,7 +853,7 @@ func (m *LabelSelectorModel) View() string {
 	} else {
 		// Normal mode footer
 		modeIndicator := modeStyle.Render("NORMAL")
-		lines = append(lines, modeIndicator+" "+footerStyle.Render("j/k: nav • i: search • s: +scope • enter: select • q: close"))
+		lines = append(lines, modeIndicator+" "+footerStyle.Render("j/k: nav • i: search • r: ID lookup • s: +scope • enter: select • q: close"))
 	}
 
 	content := strings.Join(lines, "\n")
@@ -752,8 +888,11 @@ func (m *LabelSelectorModel) renderItem(item LabelItem, isSelected bool, maxWidt
 
 	// Icon for type
 	icon := ""
-	if item.Type == "epic" {
+	switch item.Type {
+	case "epic":
 		icon = "📋 "
+	case "bead":
+		icon = "🔷 "
 	}
 
 	// Name/title
@@ -764,15 +903,29 @@ func (m *LabelSelectorModel) renderItem(item LabelItem, isSelected bool, maxWidt
 		nameStyle = nameStyle.Foreground(t.Base.GetForeground())
 	}
 
-	// Truncate title if needed
-	title := item.Title
-	maxTitleLen := maxWidth - 25 // Leave room for progress bar or overlap
-	if len(title) > maxTitleLen {
-		title = title[:maxTitleLen-1] + "…"
+	// Build display text: for beads show ID + title, for others just title
+	var displayText string
+	if item.Type == "bead" {
+		// Show ID in bold/highlighted followed by title
+		idPart := item.Value
+		titlePart := item.Title
+		maxTitleLen := maxWidth - 30 - len(idPart) // Leave room for ID and padding
+		if len(titlePart) > maxTitleLen && maxTitleLen > 5 {
+			titlePart = titlePart[:maxTitleLen-1] + "…"
+		}
+		displayText = idPart + " " + titlePart
+	} else {
+		// Truncate title if needed
+		title := item.Title
+		maxTitleLen := maxWidth - 25 // Leave room for progress bar or overlap
+		if len(title) > maxTitleLen {
+			title = title[:maxTitleLen-1] + "…"
+		}
+		displayText = title
 	}
 
 	// Build the line
-	name := prefix + icon + title
+	name := prefix + icon + displayText
 
 	// Show overlap count when in scope mode, otherwise progress bar
 	var suffix string
