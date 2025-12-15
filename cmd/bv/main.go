@@ -85,6 +85,7 @@ func main() {
 	alertSeverity := flag.String("severity", "", "Filter robot alerts by severity (info|warning|critical)")
 	alertType := flag.String("alert-type", "", "Filter robot alerts by alert type (e.g., stale_issue)")
 	alertLabel := flag.String("alert-label", "", "Filter robot alerts by label match")
+	robotReview := flag.Bool("robot-review", false, "Output review tree data as JSON")
 	recipeName := flag.String("recipe", "", "Apply named recipe (e.g., triage, actionable, high-impact)")
 	recipeShort := flag.String("r", "", "Shorthand for --recipe")
 	semanticQuery := flag.String("search", "", "Semantic search query (vector-based; builds/updates index on first run)")
