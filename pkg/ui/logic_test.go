@@ -337,6 +337,88 @@ func TestLabelDashboardViewOutputChanges(t *testing.T) {
 	}
 }
 
+func TestLabelDashboardUpstreamContextBlockers(t *testing.T) {
+	// Test that flat view includes context issues that block primaries (upstream blockers)
+	// This should match the behavior of workstream view
+	//
+	// Setup:
+	// - "blocker" (context, no label) blocks "primary" (has label)
+	// - "transitive-blocker" (context) blocks "blocker"
+	// - "downstream" (context) is blocked by "primary"
+	//
+	// Flat view should include ALL of these, not just downstream
+	issues := []model.Issue{
+		{ID: "transitive-blocker", Status: model.StatusOpen, Labels: []string{}},
+		{ID: "blocker", Status: model.StatusOpen, Labels: []string{}, Dependencies: []*model.Dependency{
+			{DependsOnID: "transitive-blocker", Type: model.DepBlocks},
+		}},
+		{ID: "primary", Status: model.StatusOpen, Labels: []string{"test-label"}, Dependencies: []*model.Dependency{
+			{DependsOnID: "blocker", Type: model.DepBlocks},
+		}},
+		{ID: "downstream", Status: model.StatusOpen, Labels: []string{}, Dependencies: []*model.Dependency{
+			{DependsOnID: "primary", Type: model.DepBlocks},
+		}},
+	}
+
+	issueMap := make(map[string]*model.Issue)
+	for i := range issues {
+		issueMap[issues[i].ID] = &issues[i]
+	}
+
+	renderer := lipgloss.DefaultRenderer()
+	theme := DefaultTheme(renderer)
+	dashboard := NewLabelDashboardModel("test-label", issues, issueMap, theme)
+	dashboard.SetSize(80, 40)
+
+	// At default Depth2, flat view should now include upstream context blockers
+	flatTotal := dashboard.IssueCount()
+	flatPrimary := dashboard.PrimaryCount()
+	flatContext := dashboard.ContextCount()
+
+	t.Logf("Flat view counts: total=%d, primary=%d, context=%d", flatTotal, flatPrimary, flatContext)
+
+	// Expected:
+	// - 1 primary: "primary"
+	// - 3 context: "blocker", "transitive-blocker", "downstream"
+	// - Total: 4
+
+	if flatPrimary != 1 {
+		t.Errorf("Expected 1 primary issue, got %d", flatPrimary)
+	}
+
+	if flatContext != 3 {
+		t.Errorf("Expected 3 context issues (blocker + transitive-blocker + downstream), got %d", flatContext)
+	}
+
+	if flatTotal != 4 {
+		t.Errorf("Expected 4 total issues, got %d", flatTotal)
+	}
+
+	// Also test at DepthAll to ensure all issues are included
+	// Depth cycle: Depth2 -> Depth3 -> DepthAll -> Depth1 -> Depth2
+	dashboard.CycleDepth() // Depth2 -> Depth3
+	dashboard.CycleDepth() // Depth3 -> DepthAll
+
+	depthAllTotal := dashboard.IssueCount()
+	t.Logf("DepthAll counts: total=%d", depthAllTotal)
+
+	if depthAllTotal != 4 {
+		t.Errorf("At DepthAll, expected 4 total issues, got %d", depthAllTotal)
+	}
+
+	// Test Depth1 (flat list of primary issues only)
+	dashboard.CycleDepth() // DepthAll -> Depth1
+
+	depth1Total := dashboard.IssueCount()
+	depth1Primary := dashboard.PrimaryCount()
+	t.Logf("Depth1 counts: total=%d, primary=%d", depth1Total, depth1Primary)
+
+	// At Depth1, only primary issues are shown (no context)
+	if depth1Primary != 1 {
+		t.Errorf("At Depth1, expected 1 primary issue, got %d", depth1Primary)
+	}
+}
+
 func TestLabelDashboardToggleViaFullUpdateCycle(t *testing.T) {
 	// Test the full Update() -> View() cycle to catch any issues with value semantics
 	issues := []model.Issue{
@@ -410,5 +492,329 @@ func TestLabelDashboardToggleViaFullUpdateCycle(t *testing.T) {
 	backToFlatView := m.View()
 	if !strings.Contains(backToFlatView, "[flat]") {
 		t.Errorf("After toggling back, view should contain '[flat]', got:\n%s", backToFlatView)
+	}
+}
+
+func TestEpicDashboardDepthBehavior(t *testing.T) {
+	// Test that epic mode depth works correctly:
+	// - Depth1: direct children of epic
+	// - Depth2: children + grandchildren
+	// - Depth3: children + grandchildren + great-grandchildren
+	//
+	// Setup: epic -> child1 -> grandchild1 -> great-grandchild1
+	//             -> child2 -> grandchild2
+	issues := []model.Issue{
+		{ID: "epic", Status: model.StatusOpen, IssueType: model.TypeEpic, Title: "Test Epic"},
+		{ID: "child1", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "epic", Type: model.DepParentChild},
+		}},
+		{ID: "child2", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "epic", Type: model.DepParentChild},
+		}},
+		{ID: "grandchild1", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "child1", Type: model.DepParentChild},
+		}},
+		{ID: "grandchild2", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "child2", Type: model.DepParentChild},
+		}},
+		{ID: "great-grandchild1", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "grandchild1", Type: model.DepParentChild},
+		}},
+	}
+
+	issueMap := make(map[string]*model.Issue)
+	for i := range issues {
+		issueMap[issues[i].ID] = &issues[i]
+	}
+
+	renderer := lipgloss.DefaultRenderer()
+	theme := DefaultTheme(renderer)
+	dashboard := NewEpicDashboardModel("epic", "Test Epic", issues, issueMap, theme)
+	dashboard.SetSize(80, 40)
+
+	// Default is Depth2
+	depth2Primary := dashboard.PrimaryCount()
+	t.Logf("Depth2 (default) primary count: %d", depth2Primary)
+
+	// Depth2 should include: child1, child2, grandchild1, grandchild2 (4 issues)
+	// Note: epic itself is NOT counted as primary, it's the "entry epic"
+	if depth2Primary != 4 {
+		t.Errorf("At Depth2, expected 4 primary issues (2 children + 2 grandchildren), got %d", depth2Primary)
+	}
+
+	// Cycle to Depth3
+	dashboard.CycleDepth() // Depth2 -> Depth3
+
+	depth3Primary := dashboard.PrimaryCount()
+	t.Logf("Depth3 primary count: %d", depth3Primary)
+
+	// Depth3 should include: child1, child2, grandchild1, grandchild2, great-grandchild1 (5 issues)
+	if depth3Primary != 5 {
+		t.Errorf("At Depth3, expected 5 primary issues, got %d", depth3Primary)
+	}
+
+	// Cycle to DepthAll
+	dashboard.CycleDepth() // Depth3 -> DepthAll
+
+	depthAllPrimary := dashboard.PrimaryCount()
+	t.Logf("DepthAll primary count: %d", depthAllPrimary)
+
+	// DepthAll should include all descendants (5 issues)
+	if depthAllPrimary != 5 {
+		t.Errorf("At DepthAll, expected 5 primary issues, got %d", depthAllPrimary)
+	}
+
+	// Cycle to Depth1
+	dashboard.CycleDepth() // DepthAll -> Depth1
+
+	depth1Primary := dashboard.PrimaryCount()
+	t.Logf("Depth1 primary count: %d", depth1Primary)
+
+	// Depth1 should include: child1, child2 (2 direct children only)
+	if depth1Primary != 2 {
+		t.Errorf("At Depth1, expected 2 primary issues (direct children), got %d", depth1Primary)
+	}
+}
+
+func TestLabelDashboardDepthBehavior(t *testing.T) {
+	// Test that label mode depth works correctly:
+	// - Depth1: only issues with the label directly applied (flat list)
+	// - Depth2: tree with 2 levels (root + children)
+	// - Depth3: tree with 3 levels (root + children + grandchildren)
+	//
+	// Setup:
+	// - "parent" has label "test-label"
+	// - "child" is a child of "parent" (via parent-child dep) but no label
+	// - "grandchild" is a child of "child" (via parent-child dep) but no label
+	issues := []model.Issue{
+		{ID: "parent", Status: model.StatusOpen, Labels: []string{"test-label"}},
+		{ID: "child", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "parent", Type: model.DepParentChild},
+		}},
+		{ID: "grandchild", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "child", Type: model.DepParentChild},
+		}},
+		{ID: "unrelated", Status: model.StatusOpen, Labels: []string{"other-label"}},
+	}
+
+	issueMap := make(map[string]*model.Issue)
+	for i := range issues {
+		issueMap[issues[i].ID] = &issues[i]
+	}
+
+	renderer := lipgloss.DefaultRenderer()
+	theme := DefaultTheme(renderer)
+	dashboard := NewLabelDashboardModel("test-label", issues, issueMap, theme)
+	dashboard.SetSize(80, 40)
+
+	// Default is Depth2 - tree shows 2 levels (parent + child)
+	depth2Primary := dashboard.PrimaryCount()
+	t.Logf("Depth2 (default) primary count: %d", depth2Primary)
+
+	// At Depth2, tree shows root + 1 level of children
+	// So we expect: parent (root) + child (1 level deep) = 2 issues
+	if depth2Primary != 2 {
+		t.Errorf("At Depth2, expected 2 primary issues (parent + child), got %d", depth2Primary)
+	}
+
+	// Cycle to Depth3 - should now include grandchild
+	dashboard.CycleDepth() // Depth2 -> Depth3
+
+	depth3Primary := dashboard.PrimaryCount()
+	t.Logf("Depth3 primary count: %d", depth3Primary)
+
+	// At Depth3, tree shows root + 2 levels of children
+	// So we expect: parent + child + grandchild = 3 issues
+	if depth3Primary != 3 {
+		t.Errorf("At Depth3, expected 3 primary issues (parent + child + grandchild), got %d", depth3Primary)
+	}
+
+	// Cycle to DepthAll
+	dashboard.CycleDepth() // Depth3 -> DepthAll
+
+	depthAllPrimary := dashboard.PrimaryCount()
+	t.Logf("DepthAll primary count: %d", depthAllPrimary)
+
+	// At DepthAll, tree shows all levels
+	if depthAllPrimary != 3 {
+		t.Errorf("At DepthAll, expected 3 primary issues, got %d", depthAllPrimary)
+	}
+
+	// Cycle to Depth1
+	dashboard.CycleDepth() // DepthAll -> Depth1
+
+	depth1Primary := dashboard.PrimaryCount()
+	t.Logf("Depth1 primary count: %d", depth1Primary)
+
+	// Depth1 should show ONLY the issue with the label directly applied (flat list)
+	if depth1Primary != 1 {
+		t.Errorf("At Depth1, expected 1 primary issue (only directly labeled), got %d", depth1Primary)
+	}
+}
+
+func TestLabelSelectorDirectCountsOnly(t *testing.T) {
+	// Setup: parent has label, children do NOT have label
+	// Label selector should count ONLY directly labeled issues (not descendants)
+	//
+	// parent (has label "test") -> child (no label)
+	//                           -> child2 (no label)
+	issues := []model.Issue{
+		{ID: "parent", Status: model.StatusOpen, Labels: []string{"test"}},
+		{ID: "child", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "parent", Type: model.DepParentChild},
+		}},
+		{ID: "child2", Status: model.StatusClosed, Dependencies: []*model.Dependency{
+			{DependsOnID: "parent", Type: model.DepParentChild},
+		}},
+		{ID: "unrelated", Status: model.StatusOpen, Labels: []string{"other"}},
+	}
+
+	renderer := lipgloss.DefaultRenderer()
+	theme := DefaultTheme(renderer)
+	selector := NewLabelSelectorModel(issues, theme)
+
+	// Find the "test" label item
+	var testLabelItem *LabelItem
+	for i := range selector.allItems {
+		if selector.allItems[i].Type == "label" && selector.allItems[i].Value == "test" {
+			testLabelItem = &selector.allItems[i]
+			break
+		}
+	}
+
+	if testLabelItem == nil {
+		t.Fatal("Expected to find 'test' label in selector")
+	}
+
+	// Should count ONLY direct: parent (1 issue with "test" label)
+	if testLabelItem.IssueCount != 1 {
+		t.Errorf("Expected IssueCount=1 (only direct), got %d", testLabelItem.IssueCount)
+	}
+
+	// Closed should be 0 (parent is open, children don't have label)
+	if testLabelItem.ClosedCount != 0 {
+		t.Errorf("Expected ClosedCount=0, got %d", testLabelItem.ClosedCount)
+	}
+
+	// Progress should be 0/1 = 0
+	if testLabelItem.Progress != 0.0 {
+		t.Errorf("Expected Progress=0, got %.3f", testLabelItem.Progress)
+	}
+}
+
+func TestEpicSelectorCountsDescendants(t *testing.T) {
+	// Setup: epic with children - epic selector should count ALL descendants
+	//
+	// epic -> child1 (open)
+	//      -> child2 (closed)
+	issues := []model.Issue{
+		{ID: "epic", Status: model.StatusOpen, IssueType: model.TypeEpic, Title: "Test Epic"},
+		{ID: "child1", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "epic", Type: model.DepParentChild},
+		}},
+		{ID: "child2", Status: model.StatusClosed, Dependencies: []*model.Dependency{
+			{DependsOnID: "epic", Type: model.DepParentChild},
+		}},
+	}
+
+	renderer := lipgloss.DefaultRenderer()
+	theme := DefaultTheme(renderer)
+	selector := NewLabelSelectorModel(issues, theme)
+
+	// Find the epic item
+	var epicItem *LabelItem
+	for i := range selector.allItems {
+		if selector.allItems[i].Type == "epic" && selector.allItems[i].Value == "epic" {
+			epicItem = &selector.allItems[i]
+			break
+		}
+	}
+
+	if epicItem == nil {
+		t.Fatal("Expected to find epic in selector")
+	}
+
+	// Should count all descendants: child1 + child2 = 2
+	if epicItem.IssueCount != 2 {
+		t.Errorf("Expected IssueCount=2 (all descendants), got %d", epicItem.IssueCount)
+	}
+
+	// Closed should be 1 (child2)
+	if epicItem.ClosedCount != 1 {
+		t.Errorf("Expected ClosedCount=1, got %d", epicItem.ClosedCount)
+	}
+
+	// Progress should be 1/2 = 0.5
+	if epicItem.Progress != 0.5 {
+		t.Errorf("Expected Progress=0.5, got %.3f", epicItem.Progress)
+	}
+}
+
+func TestCrossEpicContextBlockerIsolation(t *testing.T) {
+	// Test that viewing one epic does NOT show descendants from unrelated epics,
+	// even when they share a common upstream blocker.
+	//
+	// Setup:
+	// - Epic1 (Auth): epic1 -> child1
+	// - Epic2 (E-Commerce): epic2 -> child2
+	// - Shared blocker: "db-migrations" blocks BOTH child1 and child2
+	//
+	// When viewing Epic1, we should see:
+	// - Primary: epic1, child1
+	// - Context: db-migrations (blocker)
+	// - NOT: epic2, child2 (unrelated epic's issues)
+	issues := []model.Issue{
+		// Epic 1 (Auth)
+		{ID: "epic1", Status: model.StatusOpen, IssueType: model.TypeEpic, Title: "Auth Epic"},
+		{ID: "child1", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "epic1", Type: model.DepParentChild},
+			{DependsOnID: "db-migrations", Type: model.DepBlocks},
+		}},
+
+		// Epic 2 (E-Commerce)
+		{ID: "epic2", Status: model.StatusOpen, IssueType: model.TypeEpic, Title: "E-Commerce Epic"},
+		{ID: "child2", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "epic2", Type: model.DepParentChild},
+			{DependsOnID: "db-migrations", Type: model.DepBlocks},
+		}},
+
+		// Shared infrastructure blocker
+		{ID: "db-migrations", Status: model.StatusOpen, Title: "Database Migrations"},
+	}
+
+	issueMap := make(map[string]*model.Issue)
+	for i := range issues {
+		issueMap[issues[i].ID] = &issues[i]
+	}
+
+	renderer := lipgloss.DefaultRenderer()
+	theme := DefaultTheme(renderer)
+
+	// View Epic1 dashboard
+	dashboard := NewEpicDashboardModel("epic1", "Auth Epic", issues, issueMap, theme)
+	dashboard.SetSize(80, 40)
+
+	total := dashboard.IssueCount()
+	primary := dashboard.PrimaryCount()
+	context := dashboard.ContextCount()
+
+	t.Logf("Epic1 view: total=%d, primary=%d, context=%d", total, primary, context)
+
+	// KEY ASSERTION: Cross-epic isolation must work
+	// Total should be 3 (epic1 descendants + their blockers)
+	// NOT 5 (which would include epic2, child2)
+	//
+	// Note: The exact primary/context split depends on depth settings,
+	// but the total must exclude the other epic's issues.
+	if total != 3 {
+		t.Errorf("Expected 3 total issues (excluding epic2 branch), got %d. "+
+			"If total > 3, cross-epic isolation is broken.", total)
+	}
+
+	// Verify epic2 and child2 are NOT in the view by checking total
+	// If they were included, total would be 5
+	if total > 3 {
+		t.Errorf("Cross-epic isolation failed: got %d issues, "+
+			"expected 3 (epic1 tree + db-migrations only)", total)
 	}
 }
