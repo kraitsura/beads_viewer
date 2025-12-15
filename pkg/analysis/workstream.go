@@ -46,6 +46,11 @@ type Workstream struct {
 
 	// Ordering for sequential families
 	Order int
+
+	// Sub-grouping support
+	SubWorkstreams []*Workstream // Child workstreams (populated by SubdivideWorkstream)
+	Depth          int           // Nesting depth (0 = top level)
+	GroupedBy      string        // What family/method was used to create this group
 }
 
 // === LABEL FAMILY DETECTION ===
@@ -76,6 +81,61 @@ type FamilyScore struct {
 	Balance     float64 // How evenly distributed across labels
 }
 
+// Minimum score threshold for label-based grouping
+const MinFamilyScore = 0.15
+
+// ViewContext provides context for workstream detection
+type ViewContext struct {
+	Type          string // "label" or "epic"
+	SelectedLabel string // The label/epic being viewed
+}
+
+// GroupingOptions controls sub-grouping behavior
+type GroupingOptions struct {
+	MaxDepth        int      // Maximum recursion depth (1-3 typically)
+	CurrentDepth    int      // Current depth (0 = top level)
+	ExcludeLabels   []string // Labels to exclude from grouping (already used at parent levels)
+	ExcludeFamilies []string // Family prefixes to exclude
+	MinGroupSize    int      // Minimum issues for a workstream (default: 2)
+	MinScoreAtDepth float64  // Minimum family score, can be lower at deeper levels
+}
+
+// DefaultGroupingOptions returns sensible defaults
+func DefaultGroupingOptions() GroupingOptions {
+	return GroupingOptions{
+		MaxDepth:        3,
+		CurrentDepth:    0,
+		ExcludeLabels:   nil,
+		ExcludeFamilies: nil,
+		MinGroupSize:    2,
+		MinScoreAtDepth: MinFamilyScore,
+	}
+}
+
+// OptionsForSubdivision creates options for the next depth level
+func (opts GroupingOptions) OptionsForSubdivision(usedFamilyPrefix string, usedLabels []string) GroupingOptions {
+	newOpts := GroupingOptions{
+		MaxDepth:        opts.MaxDepth,
+		CurrentDepth:    opts.CurrentDepth + 1,
+		ExcludeLabels:   append(append([]string{}, opts.ExcludeLabels...), usedLabels...),
+		ExcludeFamilies: opts.ExcludeFamilies,
+		MinGroupSize:    opts.MinGroupSize,
+		// Lower threshold at deeper levels to allow finer grouping
+		MinScoreAtDepth: opts.MinScoreAtDepth * 0.7,
+	}
+
+	// Don't go below a minimum threshold
+	if newOpts.MinScoreAtDepth < 0.08 {
+		newOpts.MinScoreAtDepth = 0.08
+	}
+
+	if usedFamilyPrefix != "" {
+		newOpts.ExcludeFamilies = append(newOpts.ExcludeFamilies, usedFamilyPrefix)
+	}
+
+	return newOpts
+}
+
 // Patterns for detecting sequential labels
 var sequentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^(.+?)(\d+)$`),          // phase1, sprint2, v3
@@ -85,8 +145,37 @@ var sequentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^(v)(\d+(?:\.\d+)?)$`),  // v1, v2, v1.0
 }
 
-// Pattern for detecting prefixed labels
-var prefixPattern = regexp.MustCompile(`^([a-zA-Z]+):(.+)$`) // feat:auth, area:payments
+// Pattern for detecting prefixed labels (colon style)
+var colonPrefixPattern = regexp.MustCompile(`^([a-zA-Z][a-zA-Z0-9]*):(.+)$`) // feat:auth, area:payments
+
+// Patterns for detecting hyphen/underscore prefixed labels
+var separatorPrefixPattern = regexp.MustCompile(`^([a-zA-Z][a-zA-Z0-9]*)[-_](.+)$`) // auth-login, pay_form
+
+// Patterns for detecting suffix-based labels
+var separatorSuffixPattern = regexp.MustCompile(`^(.+)[-_]([a-zA-Z][a-zA-Z0-9]*)$`) // task-backend, feature-ui
+
+// looksSequential checks if a string looks like a sequence number
+func looksSequential(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	// Pure digits
+	allDigits := true
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			allDigits = false
+			break
+		}
+	}
+	if allDigits {
+		return true
+	}
+	// Common sequential patterns
+	lower := strings.ToLower(s)
+	return lower == "1" || lower == "2" || lower == "3" ||
+		strings.HasPrefix(lower, "v") && len(lower) <= 4 ||
+		lower == "q1" || lower == "q2" || lower == "q3" || lower == "q4"
+}
 
 // DetectLabelFamilies groups labels into families based on naming patterns
 func DetectLabelFamilies(labels []string) []*LabelFamily {
@@ -121,19 +210,19 @@ func DetectLabelFamilies(labels []string) []*LabelFamily {
 		}
 	}
 
-	// Pass 2: Find prefixed families (feat:*, area:*, etc.)
-	prefixedGroups := make(map[string][]string)
+	// Pass 2: Find colon-prefixed families (feat:*, area:*, etc.)
+	colonPrefixedGroups := make(map[string][]string)
 	for _, label := range labels {
 		if assigned[label] {
 			continue
 		}
-		if matches := prefixPattern.FindStringSubmatch(label); matches != nil {
+		if matches := colonPrefixPattern.FindStringSubmatch(label); matches != nil {
 			prefix := matches[1] + ":"
-			prefixedGroups[prefix] = append(prefixedGroups[prefix], label)
+			colonPrefixedGroups[prefix] = append(colonPrefixedGroups[prefix], label)
 		}
 	}
 
-	for prefix, members := range prefixedGroups {
+	for prefix, members := range colonPrefixedGroups {
 		if len(members) >= 2 {
 			familyKey := "pre:" + prefix
 			families[familyKey] = &LabelFamily{
@@ -148,7 +237,94 @@ func DetectLabelFamilies(labels []string) []*LabelFamily {
 		}
 	}
 
-	// Pass 3: Remaining labels are singletons (generic)
+	// Pass 3: Find separator-prefixed families (auth-*, pay_*, etc.)
+	// Only if not already assigned and the suffix part varies
+	separatorPrefixGroups := make(map[string][]string)
+	for _, label := range labels {
+		if assigned[label] {
+			continue
+		}
+		if matches := separatorPrefixPattern.FindStringSubmatch(label); matches != nil {
+			prefix := matches[1]
+			// Check it's not a sequential pattern we missed
+			if !looksSequential(matches[2]) {
+				separatorPrefixGroups[prefix] = append(separatorPrefixGroups[prefix], label)
+			}
+		}
+	}
+
+	for prefix, members := range separatorPrefixGroups {
+		if len(members) >= 2 {
+			familyKey := "sep-pre:" + prefix
+			families[familyKey] = &LabelFamily{
+				Type:       "prefixed",
+				Prefix:     prefix + "-", // or could detect the actual separator used
+				Labels:     members,
+				Sequential: false,
+			}
+			for _, label := range members {
+				assigned[label] = true
+			}
+		}
+	}
+
+	// Pass 4: Find suffix-based families (*-backend, *-ui, etc.)
+	// Merge all suffix-identified labels into ONE family, with suffix values as sub-groups
+	suffixGroups := make(map[string][]string)
+	for _, label := range labels {
+		if assigned[label] {
+			continue
+		}
+		if matches := separatorSuffixPattern.FindStringSubmatch(label); matches != nil {
+			suffix := matches[2]
+			// Ignore numeric suffixes (those should be sequential)
+			if !looksSequential(suffix) {
+				suffixGroups[suffix] = append(suffixGroups[suffix], label)
+			}
+		}
+	}
+
+	// Collect all valid suffix groups (2+ members each)
+	validSuffixLabels := make([]string, 0)
+	validSuffixCount := 0
+	for _, members := range suffixGroups {
+		if len(members) >= 2 {
+			validSuffixLabels = append(validSuffixLabels, members...)
+			validSuffixCount++
+		}
+	}
+
+	// Only create a suffix family if we have 2+ distinct suffix values
+	// This represents "group by suffix" as a strategy
+	if validSuffixCount >= 2 {
+		families["suf:_combined_"] = &LabelFamily{
+			Type:       "suffixed",
+			Prefix:     "_by_suffix_", // Special marker for combined suffix family
+			Labels:     validSuffixLabels,
+			Sequential: false,
+		}
+		for _, label := range validSuffixLabels {
+			assigned[label] = true
+		}
+	} else {
+		// If only one suffix group, create it as a single family
+		for suffix, members := range suffixGroups {
+			if len(members) >= 2 {
+				familyKey := "suf:" + suffix
+				families[familyKey] = &LabelFamily{
+					Type:       "suffixed",
+					Prefix:     "-" + suffix,
+					Labels:     members,
+					Sequential: false,
+				}
+				for _, label := range members {
+					assigned[label] = true
+				}
+			}
+		}
+	}
+
+	// Pass 5: Remaining labels are singletons (generic)
 	for _, label := range labels {
 		if !assigned[label] {
 			families["gen:"+label] = &LabelFamily{
@@ -297,6 +473,11 @@ func ScoreFamily(family *LabelFamily, issues []model.Issue, contextLabel string)
 		score *= 1.2
 	}
 
+	// Slight boost for suffixed families (also explicit structure, but less common)
+	if family.Type == "suffixed" {
+		score *= 1.1
+	}
+
 	// Penalty for very low coverage (need meaningful groups)
 	if coverage < 0.3 {
 		score *= coverage / 0.3
@@ -395,7 +576,10 @@ func buildDependencyGraph(issues []model.Issue) *dependencyGraph {
 	return g
 }
 
-// inheritLabels propagates labels downstream through blocking edges
+// inheritLabels propagates labels through parent-child relationships only.
+// This prevents pollution from blocking deps crossing domain boundaries.
+// Example: E-Commerce issues should NOT inherit feat:auth just because
+// auth endpoints block shared API documentation.
 func (g *dependencyGraph) inheritLabels(family *LabelFamily) {
 	if family == nil {
 		return
@@ -422,7 +606,7 @@ func (g *dependencyGraph) inheritLabels(family *LabelFamily) {
 		}
 	}
 
-	// BFS from each root, propagating labels downstream
+	// BFS from each root, propagating labels to children (parent-child only)
 	for _, r := range roots {
 		visited := make(map[string]bool)
 		queue := []string{r.issue.ID}
@@ -432,21 +616,21 @@ func (g *dependencyGraph) inheritLabels(family *LabelFamily) {
 			current := queue[0]
 			queue = queue[1:]
 
-			// Propagate to issues this one blocks
-			for _, blockedID := range g.blocks[current] {
-				if visited[blockedID] {
+			// Propagate to children only (NOT blocking deps)
+			for _, childID := range g.children[current] {
+				if visited[childID] {
 					continue
 				}
-				visited[blockedID] = true
+				visited[childID] = true
 
-				blocked := g.issues[blockedID]
-				if blocked == nil {
+				child := g.issues[childID]
+				if child == nil {
 					continue
 				}
 
 				// Check if already has a family label
 				hasLabel := false
-				for _, label := range blocked.Labels {
+				for _, label := range child.Labels {
 					if familyLabels[label] {
 						hasLabel = true
 						break
@@ -455,10 +639,10 @@ func (g *dependencyGraph) inheritLabels(family *LabelFamily) {
 
 				// Inherit if missing
 				if !hasLabel {
-					blocked.Labels = append(blocked.Labels, r.label)
+					child.Labels = append(child.Labels, r.label)
 				}
 
-				queue = append(queue, blockedID)
+				queue = append(queue, childID)
 			}
 		}
 	}
@@ -499,6 +683,12 @@ func DetectWorkstreams(issues []model.Issue, primaryIDs map[string]bool, selecte
 
 	// Build dependency graph
 	graph := buildDependencyGraph(issues)
+
+	// Build global issue map for blocking checks (needed for cross-workstream blockers)
+	globalIssueMap := make(map[string]model.Issue)
+	for _, issue := range issues {
+		globalIssueMap[issue.ID] = issue
+	}
 
 	// Analyze labels on primary issues only
 	labelStats := AnalyzeLabels(primary, selectedLabel)
@@ -543,9 +733,9 @@ func DetectWorkstreams(issues []model.Issue, primaryIDs map[string]bool, selecte
 	// Assign context issues to workstreams
 	assignContextIssues(workstreams, context, graph)
 
-	// Compute stats for each workstream
+	// Compute stats for each workstream (using global issue map for cross-workstream blockers)
 	for i := range workstreams {
-		computeWorkstreamStats(&workstreams[i], primaryIDs)
+		computeWorkstreamStats(&workstreams[i], primaryIDs, globalIssueMap)
 	}
 
 	// Detect cross-workstream dependencies
@@ -581,27 +771,62 @@ func partitionByFamily(issues []model.Issue, family *LabelFamily, stats map[stri
 		familyLabels[label] = true
 	}
 
+	// For combined suffix families, extract suffix from each label
+	// For single suffix families, use the stored suffix
+	// For other families, use the full label
+	getWorkstreamKey := func(label string) string {
+		if family.Type == "suffixed" {
+			if family.Prefix == "_by_suffix_" {
+				// Combined suffix family - extract suffix from label
+				if matches := separatorSuffixPattern.FindStringSubmatch(label); matches != nil {
+					return "ws:" + matches[2]
+				}
+			} else {
+				// Single suffix family - use stored suffix
+				suffix := strings.TrimPrefix(family.Prefix, "-")
+				return "ws:" + suffix
+			}
+		}
+		return "ws:" + label
+	}
+
+	getWorkstreamName := func(label string) string {
+		if family.Type == "suffixed" {
+			if family.Prefix == "_by_suffix_" {
+				// Combined suffix family - extract and format suffix
+				if matches := separatorSuffixPattern.FindStringSubmatch(label); matches != nil {
+					return formatWorkstreamName(matches[2])
+				}
+			} else {
+				// Single suffix family - use stored suffix
+				suffix := strings.TrimPrefix(family.Prefix, "-")
+				return formatWorkstreamName(suffix)
+			}
+		}
+		return formatWorkstreamName(label)
+	}
+
 	for _, issue := range issues {
 		assigned := false
 		for _, label := range issue.Labels {
 			if familyLabels[label] {
-				wsID := "ws:" + label
-				if workstreams[wsID] == nil {
+				wsKey := getWorkstreamKey(label)
+				if workstreams[wsKey] == nil {
 					stat := stats[label]
 					order := 0
 					if stat != nil {
 						order = stat.Order
 					}
-					workstreams[wsID] = &Workstream{
-						ID:       wsID,
-						Name:     formatWorkstreamName(label),
+					workstreams[wsKey] = &Workstream{
+						ID:       wsKey,
+						Name:     getWorkstreamName(label),
 						Issues:   make([]model.Issue, 0),
 						IssueIDs: make([]string, 0),
 						Order:    order,
 					}
 				}
-				workstreams[wsID].Issues = append(workstreams[wsID].Issues, issue)
-				workstreams[wsID].IssueIDs = append(workstreams[wsID].IssueIDs, issue.ID)
+				workstreams[wsKey].Issues = append(workstreams[wsKey].Issues, issue)
+				workstreams[wsKey].IssueIDs = append(workstreams[wsKey].IssueIDs, issue.ID)
 				assigned = true
 				break // Only assign to first matching label
 			}
@@ -638,6 +863,14 @@ func formatWorkstreamName(label string) string {
 	return label
 }
 
+// assignContextIssues assigns context issues to workstreams based on parent-child
+// relationships ONLY. Blocking deps are NOT used because they cause cross-domain
+// pollution (e.g., E-Commerce issues assigned to Auth workstream just because
+// auth endpoints block shared documentation).
+//
+// Context issues that block/are-blocked-by primary issues will still APPEAR in
+// the view (via addUpstreamContextBlockers in labeldashboard.go), but they won't
+// be assigned to any workstream unless they have a parent-child relationship.
 func assignContextIssues(workstreams []Workstream, context []model.Issue, graph *dependencyGraph) {
 	if len(context) == 0 {
 		return
@@ -651,52 +884,67 @@ func assignContextIssues(workstreams []Workstream, context []model.Issue, graph 
 		}
 	}
 
-	for _, issue := range context {
-		// Find which workstream(s) this issue connects to
-		wsCounts := make(map[int]int)
+	// Iterate multiple times to handle chains: if A→B→C and only A is connected to a primary,
+	// first pass assigns A, second pass assigns B (connected to A), third assigns C
+	unassigned := context
+	for iteration := 0; iteration < 5 && len(unassigned) > 0; iteration++ {
+		var stillUnassigned []model.Issue
 
-		// Check issues that this one blocks
-		for _, blockedID := range graph.blocks[issue.ID] {
-			if wsIdx, ok := issueToWS[blockedID]; ok {
-				wsCounts[wsIdx]++
+		for _, issue := range unassigned {
+			// Skip if already assigned in a previous iteration
+			if _, ok := issueToWS[issue.ID]; ok {
+				continue
 			}
-		}
 
-		// Check issues that block this one
-		for _, blockerID := range graph.blockedBy[issue.ID] {
-			if wsIdx, ok := issueToWS[blockerID]; ok {
-				wsCounts[wsIdx]++
-			}
-		}
+			// Find which workstream(s) this issue connects to via PARENT-CHILD ONLY
+			// Blocking deps are NOT used to prevent cross-domain pollution
+			wsCounts := make(map[int]int)
 
-		// Assign to workstream with most connections
-		bestIdx := -1
-		bestCount := 0
-		for idx, count := range wsCounts {
-			if count > bestCount {
-				bestCount = count
-				bestIdx = idx
-			}
-		}
-
-		if bestIdx >= 0 {
-			workstreams[bestIdx].Issues = append(workstreams[bestIdx].Issues, issue)
-			workstreams[bestIdx].IssueIDs = append(workstreams[bestIdx].IssueIDs, issue.ID)
-			issueToWS[issue.ID] = bestIdx
-		} else {
-			// No connections - add to standalone
-			for i := range workstreams {
-				if workstreams[i].ID == "standalone" {
-					workstreams[i].Issues = append(workstreams[i].Issues, issue)
-					workstreams[i].IssueIDs = append(workstreams[i].IssueIDs, issue.ID)
-					break
+			// Check parent-child: if this issue is a child of an assigned issue
+			if parentID := graph.parents[issue.ID]; parentID != "" {
+				if wsIdx, ok := issueToWS[parentID]; ok {
+					wsCounts[wsIdx]++
 				}
 			}
+
+			// Check parent-child: if this issue is a parent of assigned issues
+			for _, childID := range graph.children[issue.ID] {
+				if wsIdx, ok := issueToWS[childID]; ok {
+					wsCounts[wsIdx]++
+				}
+			}
+
+			// Assign to workstream with most connections (parent-child only)
+			bestIdx := -1
+			bestCount := 0
+			for idx, count := range wsCounts {
+				if count > bestCount {
+					bestCount = count
+					bestIdx = idx
+				}
+			}
+
+			if bestIdx >= 0 {
+				workstreams[bestIdx].Issues = append(workstreams[bestIdx].Issues, issue)
+				workstreams[bestIdx].IssueIDs = append(workstreams[bestIdx].IssueIDs, issue.ID)
+				issueToWS[issue.ID] = bestIdx
+			} else {
+				stillUnassigned = append(stillUnassigned, issue)
+			}
 		}
+
+		// Stop if no progress was made
+		if len(stillUnassigned) == len(unassigned) {
+			break
+		}
+		unassigned = stillUnassigned
 	}
+	// Note: Context issues with no parent-child connections to any workstream
+	// are intentionally NOT added. They appear in the view as blockers but
+	// don't belong to any specific workstream.
 }
 
-func computeWorkstreamStats(ws *Workstream, primaryIDs map[string]bool) {
+func computeWorkstreamStats(ws *Workstream, primaryIDs map[string]bool, globalIssueMap map[string]model.Issue) {
 	total := len(ws.Issues)
 	if total == 0 {
 		return
@@ -708,12 +956,6 @@ func computeWorkstreamStats(ws *Workstream, primaryIDs map[string]bool) {
 	ws.BlockedCount = 0
 	ws.InProgressCount = 0
 	ws.ClosedCount = 0
-
-	// Build issue map for blocking check
-	issueMap := make(map[string]model.Issue)
-	for _, issue := range ws.Issues {
-		issueMap[issue.ID] = issue
-	}
 
 	for _, issue := range ws.Issues {
 		// Count primary vs context
@@ -732,8 +974,8 @@ func computeWorkstreamStats(ws *Workstream, primaryIDs map[string]bool) {
 		case model.StatusInProgress:
 			ws.InProgressCount++
 		case model.StatusOpen:
-			// Check if actually blocked by dependencies
-			if isBlockedByDeps(issue, issueMap) {
+			// Check if actually blocked by dependencies (using global map to catch cross-workstream blockers)
+			if isBlockedByDeps(issue, globalIssueMap) {
 				ws.BlockedCount++
 			} else {
 				ws.ReadyCount++
@@ -984,5 +1226,263 @@ func FindDistinguishingLabels(issues []model.Issue, selectedLabel string, minGro
 		return result[i].Score > result[j].Score
 	})
 
+	return result
+}
+
+// === SUB-GROUPING API ===
+
+// DetectWorkstreamsWithOptions allows fine-grained control over grouping.
+// This is the new API that supports subdivision and depth control.
+func DetectWorkstreamsWithOptions(issues []model.Issue, primaryIDs map[string]bool, ctx ViewContext, opts GroupingOptions) []Workstream {
+	if len(issues) == 0 {
+		return nil
+	}
+
+	// Separate primary and context issues
+	primary := make([]model.Issue, 0)
+	context := make([]model.Issue, 0)
+	for _, issue := range issues {
+		if primaryIDs[issue.ID] {
+			primary = append(primary, issue)
+		} else {
+			context = append(context, issue)
+		}
+	}
+
+	// If no primary issues marked, treat all as primary
+	if len(primary) == 0 {
+		primary = issues
+		context = nil
+	}
+
+	// Build dependency graph
+	graph := buildDependencyGraph(issues)
+
+	// Build global issue map for blocking checks (needed for cross-workstream blockers)
+	globalIssueMap := make(map[string]model.Issue)
+	for _, issue := range issues {
+		globalIssueMap[issue.ID] = issue
+	}
+
+	// Combine context label with excluded labels
+	excludeLabels := make(map[string]bool)
+	excludeLabels[ctx.SelectedLabel] = true
+	for _, label := range opts.ExcludeLabels {
+		excludeLabels[label] = true
+	}
+
+	// Analyze labels on primary issues only
+	labelStats := AnalyzeLabels(primary, ctx.SelectedLabel)
+
+	// Collect unique families, excluding already-used ones
+	familyMap := make(map[string]*LabelFamily)
+	for _, stat := range labelStats {
+		if stat.Family != nil {
+			// Check if this family is excluded
+			excluded := false
+			for _, excludePrefix := range opts.ExcludeFamilies {
+				if stat.Family.Prefix == excludePrefix ||
+					strings.HasPrefix(stat.Family.Prefix, excludePrefix) {
+					excluded = true
+					break
+				}
+			}
+			if !excluded {
+				key := stat.Family.Type + ":" + stat.Family.Prefix
+				familyMap[key] = stat.Family
+			}
+		}
+	}
+
+	// Score each family
+	scores := make([]*FamilyScore, 0, len(familyMap))
+	for _, family := range familyMap {
+		score := ScoreFamily(family, primary, ctx.SelectedLabel)
+		if score.Score > 0.05 { // Low initial threshold, filter by opts later
+			scores = append(scores, score)
+		}
+	}
+
+	// Sort by score descending
+	sort.Slice(scores, func(i, j int) bool {
+		return scores[i].Score > scores[j].Score
+	})
+
+	// Decide grouping strategy
+	var workstreams []Workstream
+	var winningFamily *LabelFamily
+	var usedFamilyPrefix string
+
+	if len(scores) > 0 && scores[0].Score >= opts.MinScoreAtDepth {
+		// Label-based grouping
+		winningFamily = scores[0].Family
+		usedFamilyPrefix = winningFamily.Prefix
+
+		// Inherit labels through dependencies
+		graph.inheritLabels(winningFamily)
+
+		// Partition by labels
+		workstreams = partitionByFamily(primary, winningFamily, labelStats, ctx.SelectedLabel, primaryIDs)
+	} else {
+		// Fallback to standalone grouping
+		workstreams = partitionByFamily(primary, nil, labelStats, ctx.SelectedLabel, primaryIDs)
+	}
+
+	// Set depth and grouping method on all workstreams
+	for i := range workstreams {
+		workstreams[i].Depth = opts.CurrentDepth
+		if winningFamily != nil {
+			workstreams[i].GroupedBy = winningFamily.Type + ":" + winningFamily.Prefix
+		} else {
+			workstreams[i].GroupedBy = "dependencies"
+		}
+	}
+
+	// Assign context issues to workstreams
+	assignContextIssues(workstreams, context, graph)
+
+	// Compute stats for each workstream (using global issue map for cross-workstream blockers)
+	for i := range workstreams {
+		computeWorkstreamStats(&workstreams[i], primaryIDs, globalIssueMap)
+	}
+
+	// Detect cross-workstream dependencies
+	detectCrossWorkstreamDeps(workstreams, graph)
+
+	// Sort workstreams
+	sortWorkstreams(workstreams, winningFamily)
+
+	// Store info for potential subdivision
+	for i := range workstreams {
+		if usedFamilyPrefix != "" {
+			workstreams[i].GroupedBy = usedFamilyPrefix
+		}
+	}
+
+	return workstreams
+}
+
+// SubdivideWorkstream attempts to further divide a workstream into smaller groups.
+// Returns the sub-workstreams, or nil if no meaningful subdivision found.
+func SubdivideWorkstream(ws *Workstream, primaryIDs map[string]bool, opts GroupingOptions) []*Workstream {
+	if opts.CurrentDepth >= opts.MaxDepth {
+		return nil // Max depth reached
+	}
+
+	minSize := opts.MinGroupSize
+	if minSize < 2 {
+		minSize = 2
+	}
+
+	if len(ws.Issues) < minSize*2 {
+		return nil // Not enough issues to subdivide meaningfully
+	}
+
+	// Create context that excludes the labels used to create this workstream
+	usedLabels := extractWorkstreamLabels(ws)
+	subOpts := opts.OptionsForSubdivision(ws.GroupedBy, usedLabels)
+
+	// Build primaryIDs for this workstream's issues
+	subPrimaryIDs := make(map[string]bool)
+	for _, issue := range ws.Issues {
+		if primaryIDs[issue.ID] {
+			subPrimaryIDs[issue.ID] = true
+		}
+	}
+
+	// If no primary IDs, treat all as primary
+	if len(subPrimaryIDs) == 0 {
+		for _, issue := range ws.Issues {
+			subPrimaryIDs[issue.ID] = true
+		}
+	}
+
+	// Run detection on just this workstream's issues
+	ctx := ViewContext{
+		Type:          "subdivision",
+		SelectedLabel: "", // No single context label at subdivision level
+	}
+
+	subWorkstreams := DetectWorkstreamsWithOptions(ws.Issues, subPrimaryIDs, ctx, subOpts)
+
+	// Only accept subdivision if it creates 2+ non-standalone groups
+	meaningfulGroups := 0
+	for _, sub := range subWorkstreams {
+		if sub.ID != "standalone" && len(sub.Issues) >= minSize {
+			meaningfulGroups++
+		}
+	}
+
+	if meaningfulGroups < 2 {
+		return nil // Subdivision not meaningful
+	}
+
+	// Convert to pointers and update parent reference
+	result := make([]*Workstream, len(subWorkstreams))
+	for i := range subWorkstreams {
+		subWorkstreams[i].Depth = opts.CurrentDepth + 1
+		result[i] = &subWorkstreams[i]
+	}
+
+	ws.SubWorkstreams = result
+	return result
+}
+
+// SubdivideAll recursively subdivides all workstreams up to MaxDepth.
+func SubdivideAll(workstreams []*Workstream, primaryIDs map[string]bool, opts GroupingOptions) {
+	minSize := opts.MinGroupSize
+	if minSize < 2 {
+		minSize = 2
+	}
+
+	for _, ws := range workstreams {
+		if ws.ID == "standalone" {
+			// Try to group standalone issues too
+			subWs := SubdivideWorkstream(ws, primaryIDs, opts)
+			if subWs != nil {
+				// Standalone got subdivided - recurse
+				SubdivideAll(subWs, primaryIDs, opts.OptionsForSubdivision(ws.GroupedBy, nil))
+			}
+		} else if len(ws.Issues) >= minSize*2 {
+			// Regular workstream - try to subdivide
+			subWs := SubdivideWorkstream(ws, primaryIDs, opts)
+			if subWs != nil {
+				SubdivideAll(subWs, primaryIDs, opts.OptionsForSubdivision(ws.GroupedBy, nil))
+			}
+		}
+	}
+}
+
+// extractWorkstreamLabels gets the labels that define this workstream
+func extractWorkstreamLabels(ws *Workstream) []string {
+	// Find labels common to most issues in this workstream
+	labelCounts := make(map[string]int)
+	for _, issue := range ws.Issues {
+		for _, label := range issue.Labels {
+			labelCounts[label]++
+		}
+	}
+
+	threshold := len(ws.Issues) / 2 // Label must appear in >50% of issues
+	if threshold < 1 {
+		threshold = 1
+	}
+
+	var commonLabels []string
+	for label, count := range labelCounts {
+		if count >= threshold {
+			commonLabels = append(commonLabels, label)
+		}
+	}
+
+	return commonLabels
+}
+
+// WorkstreamPointers converts a slice of Workstreams to pointers for mutation.
+func WorkstreamPointers(workstreams []Workstream) []*Workstream {
+	result := make([]*Workstream, len(workstreams))
+	for i := range workstreams {
+		result[i] = &workstreams[i]
+	}
 	return result
 }

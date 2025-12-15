@@ -157,6 +157,9 @@ func TestDetectWorkstreams_TwoSeparateChains(t *testing.T) {
 
 func TestDetectWorkstreams_ContextIssues(t *testing.T) {
 	// A (primary) depends on B (context - not in primaryIDs)
+	// B is connected via blocking dep only, NOT parent-child
+	// Context issues without parent-child connection are NOT assigned to workstreams
+	// (this prevents cross-domain pollution from blocking deps)
 	issues := []model.Issue{
 		{
 			ID:     "A",
@@ -178,8 +181,44 @@ func TestDetectWorkstreams_ContextIssues(t *testing.T) {
 	if ws[0].PrimaryCount != 1 {
 		t.Errorf("expected PrimaryCount 1, got %d", ws[0].PrimaryCount)
 	}
+	// Context issues are NOT assigned via blocking deps anymore (only parent-child)
+	// B will appear in the view as a blocker but won't be in the workstream
+	if ws[0].ContextCount != 0 {
+		t.Errorf("expected ContextCount 0 (no parent-child connection), got %d", ws[0].ContextCount)
+	}
+}
+
+func TestDetectWorkstreams_ContextIssuesViaParentChild(t *testing.T) {
+	// A (primary) has child B (context - not in primaryIDs)
+	// B is connected via parent-child, so it SHOULD be assigned to workstream
+	issues := []model.Issue{
+		{
+			ID:     "A",
+			Title:  "Issue A",
+			Status: model.StatusOpen,
+		},
+		{
+			ID:     "B",
+			Title:  "Issue B",
+			Status: model.StatusOpen,
+			Dependencies: []*model.Dependency{
+				{IssueID: "B", DependsOnID: "A", Type: model.DepParentChild},
+			},
+		},
+	}
+	primaryIDs := map[string]bool{"A": true} // B is context (child of A)
+
+	ws := DetectWorkstreams(issues, primaryIDs, "test-label")
+
+	if len(ws) != 1 {
+		t.Fatalf("expected 1 workstream, got %d", len(ws))
+	}
+	if ws[0].PrimaryCount != 1 {
+		t.Errorf("expected PrimaryCount 1, got %d", ws[0].PrimaryCount)
+	}
+	// Context issues ARE assigned via parent-child relationships
 	if ws[0].ContextCount != 1 {
-		t.Errorf("expected ContextCount 1, got %d", ws[0].ContextCount)
+		t.Errorf("expected ContextCount 1 (via parent-child), got %d", ws[0].ContextCount)
 	}
 }
 
@@ -1152,5 +1191,365 @@ func TestPropagateLabelsThroughDeps_StopsAtAnchor(t *testing.T) {
 	// B should inherit phase2 from P2 (not phase1)
 	if assigned["B"] != "phase2" {
 		t.Errorf("B should have inherited phase2 from P2, got %q", assigned["B"])
+	}
+}
+
+// === NEW ALGORITHM TESTS ===
+
+func TestDetectLabelFamilies_SeparatorPrefix(t *testing.T) {
+	// Test separator-prefixed labels (auth-login, auth-logout, pay-form, etc.)
+	labels := []string{"auth-login", "auth-logout", "auth-register", "pay-form", "pay-checkout"}
+
+	families := DetectLabelFamilies(labels)
+
+	// Find auth- family
+	var authFamily *LabelFamily
+	var payFamily *LabelFamily
+	for _, f := range families {
+		if f.Prefix == "auth-" {
+			authFamily = f
+		}
+		if f.Prefix == "pay-" {
+			payFamily = f
+		}
+	}
+
+	if authFamily == nil {
+		t.Error("expected to find auth- family")
+	} else {
+		if len(authFamily.Labels) != 3 {
+			t.Errorf("auth- family should have 3 labels, got %d", len(authFamily.Labels))
+		}
+		if authFamily.Type != "prefixed" {
+			t.Errorf("auth- family should be type 'prefixed', got %q", authFamily.Type)
+		}
+	}
+
+	if payFamily == nil {
+		t.Error("expected to find pay- family")
+	} else {
+		if len(payFamily.Labels) != 2 {
+			t.Errorf("pay- family should have 2 labels, got %d", len(payFamily.Labels))
+		}
+	}
+}
+
+func TestDetectLabelFamilies_Suffix(t *testing.T) {
+	// Test suffix-based labels where prefixes vary but suffixes are consistent
+	// Use unique prefixes that won't form their own prefix families
+	labels := []string{"issue123-backend", "ticket456-backend", "bug789-frontend", "task000-frontend"}
+
+	families := DetectLabelFamilies(labels)
+
+	// Log what we got for debugging
+	t.Logf("Found %d families:", len(families))
+	for _, f := range families {
+		t.Logf("  Type=%s Prefix=%q Labels=%v", f.Type, f.Prefix, f.Labels)
+	}
+
+	// With 2+ distinct suffix values (backend, frontend), should create combined suffix family
+	var suffixFamily *LabelFamily
+	for _, f := range families {
+		if f.Type == "suffixed" {
+			suffixFamily = f
+			break
+		}
+	}
+
+	if suffixFamily == nil {
+		t.Error("expected to find suffixed family")
+	} else {
+		if suffixFamily.Prefix != "_by_suffix_" {
+			t.Errorf("combined suffix family should have prefix '_by_suffix_', got %q", suffixFamily.Prefix)
+		}
+		if len(suffixFamily.Labels) != 4 {
+			t.Errorf("suffix family should have 4 labels, got %d", len(suffixFamily.Labels))
+		}
+	}
+}
+
+func TestDetectLabelFamilies_CombinedSuffix(t *testing.T) {
+	// Test that multiple suffix groups get combined into one family
+	// Use unique prefixes that won't form their own prefix families (each prefix only appears once)
+	labels := []string{
+		"issue1-backend", "ticket2-backend", "bug3-backend", // backend suffix (3)
+		"feature4-frontend", "task5-frontend",               // frontend suffix (2)
+		"single-api",                                        // api suffix (only 1, doesn't qualify)
+	}
+
+	families := DetectLabelFamilies(labels)
+
+	// Log what we got for debugging
+	t.Logf("Found %d families:", len(families))
+	for _, f := range families {
+		t.Logf("  Type=%s Prefix=%q Labels=%v", f.Type, f.Prefix, f.Labels)
+	}
+
+	// Should have one combined suffix family with backend (3) + frontend (2) = 5 labels
+	var suffixFamily *LabelFamily
+	for _, f := range families {
+		if f.Type == "suffixed" {
+			suffixFamily = f
+			break
+		}
+	}
+
+	if suffixFamily == nil {
+		t.Error("expected to find suffixed family")
+	} else {
+		// Should have 5 labels (3 backend + 2 frontend, not api which only has 1)
+		if len(suffixFamily.Labels) != 5 {
+			t.Errorf("combined suffix family should have 5 labels, got %d: %v", len(suffixFamily.Labels), suffixFamily.Labels)
+		}
+	}
+
+	// single-api should be in generic (singleton) since "api" suffix only has 1 member
+	var genericFound bool
+	for _, f := range families {
+		if f.Type == "generic" {
+			for _, l := range f.Labels {
+				if l == "single-api" {
+					genericFound = true
+					break
+				}
+			}
+		}
+	}
+	if !genericFound {
+		t.Error("single-api should be in a generic family (insufficient suffix group)")
+	}
+}
+
+func TestSubdivideWorkstream_Basic(t *testing.T) {
+	// Create a workstream with 8 issues split across two label groups
+	issues := []model.Issue{
+		{ID: "A1", Labels: []string{"feature-auth"}, Status: model.StatusOpen},
+		{ID: "A2", Labels: []string{"feature-auth"}, Status: model.StatusOpen},
+		{ID: "A3", Labels: []string{"feature-auth"}, Status: model.StatusOpen},
+		{ID: "A4", Labels: []string{"feature-auth"}, Status: model.StatusOpen},
+		{ID: "B1", Labels: []string{"feature-payments"}, Status: model.StatusOpen},
+		{ID: "B2", Labels: []string{"feature-payments"}, Status: model.StatusOpen},
+		{ID: "B3", Labels: []string{"feature-payments"}, Status: model.StatusOpen},
+		{ID: "B4", Labels: []string{"feature-payments"}, Status: model.StatusOpen},
+	}
+
+	ws := &Workstream{
+		ID:     "ws:test",
+		Name:   "Test",
+		Issues: issues,
+	}
+
+	primaryIDs := make(map[string]bool)
+	for _, issue := range issues {
+		primaryIDs[issue.ID] = true
+	}
+
+	opts := DefaultGroupingOptions()
+
+	subWs := SubdivideWorkstream(ws, primaryIDs, opts)
+
+	if subWs == nil {
+		t.Fatal("expected subdivision to succeed")
+	}
+
+	// Should have 2 sub-workstreams (feature-auth and feature-payments)
+	// Note: may have standalone depending on family detection
+	if len(subWs) < 2 {
+		t.Errorf("expected at least 2 sub-workstreams, got %d", len(subWs))
+	}
+
+	// Total issues across sub-workstreams should equal original
+	totalIssues := 0
+	for _, sub := range subWs {
+		totalIssues += len(sub.Issues)
+	}
+	if totalIssues != 8 {
+		t.Errorf("expected 8 total issues across sub-workstreams, got %d", totalIssues)
+	}
+}
+
+func TestSubdivideAll_Recursive(t *testing.T) {
+	// Create issues with hierarchical labels that can be subdivided recursively
+	// Level 0: all have feat:large-project
+	// Level 1: phase1 vs phase2
+	// Level 2: ui vs api within each phase
+	issues := []model.Issue{
+		// Phase1 - UI (2)
+		{ID: "P1-UI-1", Labels: []string{"phase1", "scope-ui"}, Status: model.StatusOpen},
+		{ID: "P1-UI-2", Labels: []string{"phase1", "scope-ui"}, Status: model.StatusOpen},
+		// Phase1 - API (2)
+		{ID: "P1-API-1", Labels: []string{"phase1", "scope-api"}, Status: model.StatusOpen},
+		{ID: "P1-API-2", Labels: []string{"phase1", "scope-api"}, Status: model.StatusOpen},
+		// Phase2 - UI (2)
+		{ID: "P2-UI-1", Labels: []string{"phase2", "scope-ui"}, Status: model.StatusOpen},
+		{ID: "P2-UI-2", Labels: []string{"phase2", "scope-ui"}, Status: model.StatusOpen},
+		// Phase2 - API (2)
+		{ID: "P2-API-1", Labels: []string{"phase2", "scope-api"}, Status: model.StatusOpen},
+		{ID: "P2-API-2", Labels: []string{"phase2", "scope-api"}, Status: model.StatusOpen},
+	}
+
+	primaryIDs := make(map[string]bool)
+	for _, issue := range issues {
+		primaryIDs[issue.ID] = true
+	}
+
+	// Detect initial workstreams
+	ws := DetectWorkstreams(issues, primaryIDs, "feat:large-project")
+
+	// Convert to pointers for subdivision
+	wsPtrs := WorkstreamPointers(ws)
+
+	// Apply recursive subdivision
+	opts := DefaultGroupingOptions()
+	opts.MaxDepth = 2
+	SubdivideAll(wsPtrs, primaryIDs, opts)
+
+	// Check that subdivision occurred at some level
+	// This is a smoke test - the actual subdivision depends on the scoring algorithm
+	t.Logf("After SubdivideAll with MaxDepth=2:")
+	for _, w := range wsPtrs {
+		t.Logf("  %s: %d issues, %d sub-workstreams", w.Name, len(w.Issues), len(w.SubWorkstreams))
+		for _, sub := range w.SubWorkstreams {
+			t.Logf("    - %s: %d issues", sub.Name, len(sub.Issues))
+		}
+	}
+}
+
+func TestGroupingOptions_DepthLimit(t *testing.T) {
+	// Test that MaxDepth is respected
+	issues := []model.Issue{
+		{ID: "A1", Labels: []string{"phase1", "area-ui"}, Status: model.StatusOpen},
+		{ID: "A2", Labels: []string{"phase1", "area-ui"}, Status: model.StatusOpen},
+		{ID: "A3", Labels: []string{"phase1", "area-api"}, Status: model.StatusOpen},
+		{ID: "A4", Labels: []string{"phase1", "area-api"}, Status: model.StatusOpen},
+		{ID: "B1", Labels: []string{"phase2", "area-ui"}, Status: model.StatusOpen},
+		{ID: "B2", Labels: []string{"phase2", "area-ui"}, Status: model.StatusOpen},
+		{ID: "B3", Labels: []string{"phase2", "area-api"}, Status: model.StatusOpen},
+		{ID: "B4", Labels: []string{"phase2", "area-api"}, Status: model.StatusOpen},
+	}
+
+	ws := &Workstream{
+		ID:     "ws:test",
+		Name:   "Test",
+		Issues: issues,
+	}
+
+	primaryIDs := make(map[string]bool)
+	for _, issue := range issues {
+		primaryIDs[issue.ID] = true
+	}
+
+	// Test with MaxDepth=0 (no subdivision)
+	opts := GroupingOptions{
+		MaxDepth:        0,
+		CurrentDepth:    0,
+		MinGroupSize:    2,
+		MinScoreAtDepth: MinFamilyScore,
+	}
+
+	subWs := SubdivideWorkstream(ws, primaryIDs, opts)
+
+	if subWs != nil {
+		t.Error("with MaxDepth=0, subdivision should return nil")
+	}
+
+	// Test with MaxDepth=1 (one level only)
+	opts.MaxDepth = 1
+	subWs = SubdivideWorkstream(ws, primaryIDs, opts)
+
+	if subWs != nil {
+		// If subdivision succeeded, check that sub-workstreams don't have their own children
+		for _, sub := range subWs {
+			if len(sub.SubWorkstreams) > 0 {
+				t.Error("with MaxDepth=1, sub-workstreams should not have their own children")
+			}
+		}
+	}
+}
+
+func TestLooksSequential(t *testing.T) {
+	testCases := []struct {
+		input    string
+		expected bool
+	}{
+		{"1", true},
+		{"2", true},
+		{"3", true},
+		{"123", true},
+		{"v1", true},
+		{"v2", true},
+		{"v12", true},
+		{"q1", true},
+		{"Q2", true},
+		{"q3", true},
+		{"q4", true},
+		{"backend", false},
+		{"frontend", false},
+		{"ui", false},
+		{"api", false},
+		{"auth", false},
+		{"", false},
+	}
+
+	for _, tc := range testCases {
+		got := looksSequential(tc.input)
+		if got != tc.expected {
+			t.Errorf("looksSequential(%q) = %v, want %v", tc.input, got, tc.expected)
+		}
+	}
+}
+
+func TestDetectWorkstreamsWithOptions_Basic(t *testing.T) {
+	issues := []model.Issue{
+		{ID: "A1", Labels: []string{"phase1"}, Status: model.StatusOpen},
+		{ID: "A2", Labels: []string{"phase1"}, Status: model.StatusOpen},
+		{ID: "B1", Labels: []string{"phase2"}, Status: model.StatusOpen},
+		{ID: "B2", Labels: []string{"phase2"}, Status: model.StatusOpen},
+	}
+
+	primaryIDs := map[string]bool{"A1": true, "A2": true, "B1": true, "B2": true}
+
+	ctx := ViewContext{
+		Type:          "label",
+		SelectedLabel: "test-label",
+	}
+
+	opts := DefaultGroupingOptions()
+
+	ws := DetectWorkstreamsWithOptions(issues, primaryIDs, ctx, opts)
+
+	if len(ws) < 2 {
+		t.Errorf("expected at least 2 workstreams, got %d", len(ws))
+	}
+
+	// Check that Depth and GroupedBy are set
+	for _, w := range ws {
+		if w.GroupedBy == "" {
+			t.Error("expected GroupedBy to be set")
+		}
+		// Depth should be 0 for top-level
+		if w.Depth != 0 {
+			t.Errorf("expected Depth=0 for top-level, got %d", w.Depth)
+		}
+	}
+}
+
+func TestWorkstreamPointers(t *testing.T) {
+	ws := []Workstream{
+		{ID: "ws1", Name: "First"},
+		{ID: "ws2", Name: "Second"},
+	}
+
+	ptrs := WorkstreamPointers(ws)
+
+	if len(ptrs) != 2 {
+		t.Fatalf("expected 2 pointers, got %d", len(ptrs))
+	}
+
+	// Modify through pointer should affect original
+	ptrs[0].Name = "Modified"
+
+	if ws[0].Name != "Modified" {
+		t.Error("modification through pointer should affect original slice")
 	}
 }
