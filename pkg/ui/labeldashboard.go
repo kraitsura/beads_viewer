@@ -2,8 +2,10 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/analysis"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
@@ -39,12 +41,13 @@ func (d DepthOption) String() string {
 
 // TreeNode represents a node in the dependency tree
 type TreeNode struct {
-	Issue       model.Issue
-	IsPrimary   bool        // true if has the label
-	Children    []*TreeNode // downstream issues (what this unblocks)
-	Depth       int         // depth in tree (0 = root)
-	IsLastChild bool        // for rendering tree lines
-	ParentPath  []bool      // track which ancestors are last children (for tree lines)
+	Issue        model.Issue
+	IsPrimary    bool        // true if has the label
+	IsEntryEpic  bool        // true if this is the entry point epic (when viewing an epic)
+	Children     []*TreeNode // downstream issues (what this unblocks)
+	Depth        int         // depth in tree (0 = root)
+	IsLastChild  bool        // for rendering tree lines
+	ParentPath   []bool      // track which ancestors are last children (for tree lines)
 }
 
 // FlatNode is a flattened tree node for display/navigation
@@ -67,12 +70,22 @@ type LabelDashboardModel struct {
 	flatNodes   []FlatNode           // Flattened for display
 	allIssues   []model.Issue        // Reference to all issues
 	issueMap    map[string]*model.Issue
-	primaryIDs  map[string]bool      // Issues that have the label
+	primaryIDs  map[string]bool      // Issues that have the label (expanded via parent-child)
+	directPrimaryIDs map[string]bool // Issues that directly have the label (not expanded)
 	blockedByMap map[string]string   // issue ID -> blocking issue ID
 
+	// Epic mode: depth-specific descendant maps
+	// For epic mode, depth semantics differ from label mode:
+	// - Depth1 = direct children of epic
+	// - Depth2 = children + grandchildren
+	// - Depth3 = children + grandchildren + great-grandchildren
+	// - DepthAll = all descendants
+	epicDescendantsByDepth map[DepthOption]map[string]bool
+
 	// Dependency graphs
-	downstream map[string][]string // issue ID -> issues it unblocks
-	upstream   map[string][]string // issue ID -> issues that block it
+	downstream      map[string][]string // issue ID -> issues it unblocks (blocks + parent-child)
+	upstream        map[string][]string // issue ID -> issues that block it
+	parentChildDown map[string][]string // issue ID -> children (parent-child only, no blocking)
 
 	// Dependency expansion
 	dependencyDepth DepthOption
@@ -90,6 +103,12 @@ type LabelDashboardModel struct {
 	wsExpanded map[int]bool // Which workstreams are expanded
 	wsScroll   int          // Scroll offset for workstream view
 	wsTreeView bool         // Show dependency tree within workstreams
+
+	// Sub-workstream support
+	workstreamPtrs []*analysis.Workstream // Pointers for mutation during subdivision
+	wsSubdivided   bool                   // Whether subdivision is active
+	subWSExpanded  map[int]map[int]bool   // wsIndex -> subIndex -> expanded
+	subWsCursor    map[int]int            // wsIndex -> subWsCursor
 
 	// UI State
 	cursor          int
@@ -113,29 +132,90 @@ type LabelDashboardModel struct {
 // NewLabelDashboardModel creates a new label dashboard for the given label
 func NewLabelDashboardModel(labelName string, allIssues []model.Issue, issueMap map[string]*model.Issue, theme Theme) LabelDashboardModel {
 	m := LabelDashboardModel{
-		labelName:       labelName,
-		viewMode:        "label",
-		allIssues:       allIssues,
-		issueMap:        issueMap,
-		theme:           theme,
-		dependencyDepth: Depth2, // Default to 2 levels (shows immediate deps)
-		width:           80,
-		height:          24,
-		primaryIDs:      make(map[string]bool),
+		labelName:        labelName,
+		viewMode:         "label",
+		allIssues:        allIssues,
+		issueMap:         issueMap,
+		theme:            theme,
+		dependencyDepth:  Depth2, // Default to 2 levels (shows immediate deps)
+		width:            80,
+		height:           24,
+		primaryIDs:       make(map[string]bool),
+		directPrimaryIDs: make(map[string]bool),
 	}
 
-	// Find primary issues (have this label)
+	// Find direct primary issues (have this label directly)
 	for _, issue := range allIssues {
 		for _, label := range issue.Labels {
 			if label == labelName {
-				m.primaryIDs[issue.ID] = true
+				m.directPrimaryIDs[issue.ID] = true
 				break
 			}
 		}
 	}
 
+	// Expand to include all descendants via parent-child
+	// This ensures children of labeled epics appear in the view
+	m.primaryIDs = expandToDescendants(m.directPrimaryIDs, allIssues)
+
 	m.buildGraphs()
 	m.buildTree()
+	m.recomputeWorkstreams() // Ensure workstreams use same issue set as flat view
+
+	return m
+}
+
+// NewBeadDashboardModel creates a dashboard for any issue and its descendants/blocked issues.
+// Unlike epic mode which only shows parent-child descendants, bead mode also includes
+// issues that are blocked by the entry issue (downstream dependency graph).
+func NewBeadDashboardModel(issueID string, allIssues []model.Issue, issueMap map[string]*model.Issue, theme Theme) LabelDashboardModel {
+	issue, exists := issueMap[issueID]
+	if !exists {
+		// Return empty dashboard if issue not found
+		return LabelDashboardModel{
+			labelName:        "Not Found: " + issueID,
+			viewMode:         "bead",
+			allIssues:        allIssues,
+			issueMap:         issueMap,
+			theme:            theme,
+			dependencyDepth:  Depth2,
+			width:            80,
+			height:           24,
+			primaryIDs:       make(map[string]bool),
+			directPrimaryIDs: make(map[string]bool),
+		}
+	}
+
+	m := LabelDashboardModel{
+		labelName:        issue.Title,
+		viewMode:         "bead",
+		epicID:           issueID, // Reuse epicID field for entry point
+		allIssues:        allIssues,
+		issueMap:         issueMap,
+		theme:            theme,
+		dependencyDepth:  Depth2,
+		width:            80,
+		height:           24,
+		primaryIDs:       make(map[string]bool),
+		directPrimaryIDs: make(map[string]bool),
+	}
+
+	// For bead mode, directPrimaryIDs contains DIRECT CHILDREN of the entry bead
+	directChildren := getDirectChildren(issueID, allIssues)
+	for childID := range directChildren {
+		m.directPrimaryIDs[childID] = true
+	}
+
+	// primaryIDs contains the entry issue + all descendants via parent-child + all blocked issues
+	entrySet := map[string]bool{issueID: true}
+	m.primaryIDs = expandToDescendantsAndBlocked(entrySet, allIssues)
+
+	// Build depth-specific descendant maps (reuse epic logic)
+	m.epicDescendantsByDepth = buildBeadDescendantsByDepth(issueID, allIssues)
+
+	m.buildGraphs()
+	m.buildTree()
+	m.recomputeWorkstreams()
 
 	return m
 }
@@ -143,32 +223,327 @@ func NewLabelDashboardModel(labelName string, allIssues []model.Issue, issueMap 
 // NewEpicDashboardModel creates a dashboard for an epic's children
 func NewEpicDashboardModel(epicID string, epicTitle string, allIssues []model.Issue, issueMap map[string]*model.Issue, theme Theme) LabelDashboardModel {
 	m := LabelDashboardModel{
-		labelName:       epicTitle,
-		viewMode:        "epic",
-		epicID:          epicID,
-		allIssues:       allIssues,
-		issueMap:        issueMap,
-		theme:           theme,
-		dependencyDepth: Depth2,
-		width:           80,
-		height:          24,
-		primaryIDs:      make(map[string]bool),
+		labelName:        epicTitle,
+		viewMode:         "epic",
+		epicID:           epicID,
+		allIssues:        allIssues,
+		issueMap:         issueMap,
+		theme:            theme,
+		dependencyDepth:  Depth2,
+		width:            80,
+		height:           24,
+		primaryIDs:       make(map[string]bool),
+		directPrimaryIDs: make(map[string]bool),
 	}
 
-	// Find children of this epic
-	for _, issue := range allIssues {
+	// For epic mode, directPrimaryIDs contains DIRECT CHILDREN of the epic (not the epic itself)
+	// This matches the intended behavior: Depth1 = direct children
+	directChildren := getDirectChildren(epicID, allIssues)
+	for childID := range directChildren {
+		m.directPrimaryIDs[childID] = true
+	}
+
+	// primaryIDs contains ALL descendants (for DepthAll)
+	// Start with epic itself for tree building
+	epicSet := map[string]bool{epicID: true}
+	m.primaryIDs = expandToDescendants(epicSet, allIssues)
+
+	// Build depth-specific descendant maps for epic mode
+	m.epicDescendantsByDepth = buildEpicDescendantsByDepth(epicID, allIssues)
+
+	m.buildGraphs()
+	m.buildTree()
+	m.recomputeWorkstreams() // Ensure workstreams use same issue set as flat view
+
+	return m
+}
+
+// getDirectChildren returns the direct children of an issue via parent-child relationships
+func getDirectChildren(parentID string, issues []model.Issue) map[string]bool {
+	children := make(map[string]bool)
+	for _, issue := range issues {
 		for _, dep := range issue.Dependencies {
-			if dep.DependsOnID == epicID && dep.Type == model.DepParentChild {
-				m.primaryIDs[issue.ID] = true
+			if dep.Type == model.DepParentChild && dep.DependsOnID == parentID {
+				children[issue.ID] = true
 				break
 			}
 		}
 	}
+	return children
+}
 
-	m.buildGraphs()
-	m.buildTree()
+// buildEpicDescendantsByDepth builds maps of descendants at each depth level for epic mode.
+// Depth1 = direct children only
+// Depth2 = children + grandchildren
+// Depth3 = children + grandchildren + great-grandchildren
+// DepthAll = all descendants
+func buildEpicDescendantsByDepth(epicID string, issues []model.Issue) map[DepthOption]map[string]bool {
+	// Build parent -> children map
+	children := make(map[string][]string)
+	for _, issue := range issues {
+		for _, dep := range issue.Dependencies {
+			if dep.Type == model.DepParentChild {
+				children[dep.DependsOnID] = append(children[dep.DependsOnID], issue.ID)
+			}
+		}
+	}
 
-	return m
+	result := make(map[DepthOption]map[string]bool)
+
+	// BFS with depth tracking
+	type queueItem struct {
+		id    string
+		depth int
+	}
+
+	// Collect descendants at each level
+	descendantsByLevel := make(map[int]map[string]bool)
+	visited := make(map[string]bool)
+	queue := []queueItem{{id: epicID, depth: 0}}
+	visited[epicID] = true
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		for _, childID := range children[current.id] {
+			if !visited[childID] {
+				visited[childID] = true
+				childDepth := current.depth + 1
+
+				if descendantsByLevel[childDepth] == nil {
+					descendantsByLevel[childDepth] = make(map[string]bool)
+				}
+				descendantsByLevel[childDepth][childID] = true
+
+				queue = append(queue, queueItem{id: childID, depth: childDepth})
+			}
+		}
+	}
+
+	// Build cumulative sets for each DepthOption
+	// Depth1 = level 1 only (direct children)
+	result[Depth1] = make(map[string]bool)
+	for id := range descendantsByLevel[1] {
+		result[Depth1][id] = true
+	}
+
+	// Depth2 = levels 1-2
+	result[Depth2] = make(map[string]bool)
+	for level := 1; level <= 2; level++ {
+		for id := range descendantsByLevel[level] {
+			result[Depth2][id] = true
+		}
+	}
+
+	// Depth3 = levels 1-3
+	result[Depth3] = make(map[string]bool)
+	for level := 1; level <= 3; level++ {
+		for id := range descendantsByLevel[level] {
+			result[Depth3][id] = true
+		}
+	}
+
+	// DepthAll = all levels
+	result[DepthAll] = make(map[string]bool)
+	for level := range descendantsByLevel {
+		for id := range descendantsByLevel[level] {
+			result[DepthAll][id] = true
+		}
+	}
+
+	return result
+}
+
+// expandToDescendants expands a set of issue IDs to include all descendants
+// via parent-child relationships. Uses BFS to find all children recursively.
+func expandToDescendants(primaryIDs map[string]bool, issues []model.Issue) map[string]bool {
+	if len(primaryIDs) == 0 {
+		return primaryIDs
+	}
+
+	// Build parent -> children map
+	children := make(map[string][]string)
+	for _, issue := range issues {
+		for _, dep := range issue.Dependencies {
+			if dep.Type == model.DepParentChild {
+				// issue is a child of dep.DependsOnID
+				children[dep.DependsOnID] = append(children[dep.DependsOnID], issue.ID)
+			}
+		}
+	}
+
+	// BFS to find all descendants
+	expanded := make(map[string]bool)
+	for id := range primaryIDs {
+		expanded[id] = true
+	}
+
+	queue := make([]string, 0, len(primaryIDs))
+	for id := range primaryIDs {
+		queue = append(queue, id)
+	}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		for _, childID := range children[current] {
+			if !expanded[childID] {
+				expanded[childID] = true
+				queue = append(queue, childID)
+			}
+		}
+	}
+
+	return expanded
+}
+
+// expandToDescendantsAndBlocked expands a set of issue IDs to include:
+// 1. All descendants via parent-child relationships (like expandToDescendants)
+// 2. All issues that the primary set blocks (downstream dependency graph)
+// This is used for bead mode where we want to show what an issue unblocks.
+func expandToDescendantsAndBlocked(primaryIDs map[string]bool, issues []model.Issue) map[string]bool {
+	if len(primaryIDs) == 0 {
+		return primaryIDs
+	}
+
+	// First expand via parent-child
+	expanded := expandToDescendants(primaryIDs, issues)
+
+	// Build blocks graph: issue ID -> issues it blocks (issues that depend on it)
+	blocks := make(map[string][]string)
+	for _, issue := range issues {
+		for _, dep := range issue.Dependencies {
+			if dep.Type == model.DepBlocks {
+				// issue depends on dep.DependsOnID, meaning dep.DependsOnID blocks issue
+				blocks[dep.DependsOnID] = append(blocks[dep.DependsOnID], issue.ID)
+			}
+		}
+	}
+
+	// BFS to find all blocked issues (downstream from primary set)
+	queue := make([]string, 0, len(expanded))
+	for id := range expanded {
+		queue = append(queue, id)
+	}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		for _, blockedID := range blocks[current] {
+			if !expanded[blockedID] {
+				expanded[blockedID] = true
+				queue = append(queue, blockedID)
+			}
+		}
+	}
+
+	return expanded
+}
+
+// buildBeadDescendantsByDepth builds maps of descendants at each depth level for bead mode.
+// Similar to buildEpicDescendantsByDepth but includes both parent-child AND blocking relationships.
+// Depth1 = direct children + directly blocked issues
+// Depth2 = above + grandchildren + transitively blocked
+// etc.
+func buildBeadDescendantsByDepth(beadID string, issues []model.Issue) map[DepthOption]map[string]bool {
+	// Build parent -> children map AND blocker -> blocked map
+	children := make(map[string][]string)
+	blocks := make(map[string][]string)
+	for _, issue := range issues {
+		for _, dep := range issue.Dependencies {
+			switch dep.Type {
+			case model.DepParentChild:
+				children[dep.DependsOnID] = append(children[dep.DependsOnID], issue.ID)
+			case model.DepBlocks:
+				blocks[dep.DependsOnID] = append(blocks[dep.DependsOnID], issue.ID)
+			}
+		}
+	}
+
+	result := make(map[DepthOption]map[string]bool)
+
+	// BFS with depth tracking - follow both parent-child and blocking edges
+	type queueItem struct {
+		id    string
+		depth int
+	}
+
+	// Collect descendants at each level
+	descendantsByLevel := make(map[int]map[string]bool)
+	visited := make(map[string]bool)
+	queue := []queueItem{{id: beadID, depth: 0}}
+	visited[beadID] = true
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		// Follow parent-child edges
+		for _, childID := range children[current.id] {
+			if !visited[childID] {
+				visited[childID] = true
+				childDepth := current.depth + 1
+
+				if descendantsByLevel[childDepth] == nil {
+					descendantsByLevel[childDepth] = make(map[string]bool)
+				}
+				descendantsByLevel[childDepth][childID] = true
+
+				queue = append(queue, queueItem{id: childID, depth: childDepth})
+			}
+		}
+
+		// Follow blocking edges
+		for _, blockedID := range blocks[current.id] {
+			if !visited[blockedID] {
+				visited[blockedID] = true
+				blockedDepth := current.depth + 1
+
+				if descendantsByLevel[blockedDepth] == nil {
+					descendantsByLevel[blockedDepth] = make(map[string]bool)
+				}
+				descendantsByLevel[blockedDepth][blockedID] = true
+
+				queue = append(queue, queueItem{id: blockedID, depth: blockedDepth})
+			}
+		}
+	}
+
+	// Build cumulative sets for each DepthOption
+	// Depth1 = level 1 only (direct children + directly blocked)
+	result[Depth1] = make(map[string]bool)
+	for id := range descendantsByLevel[1] {
+		result[Depth1][id] = true
+	}
+
+	// Depth2 = levels 1-2
+	result[Depth2] = make(map[string]bool)
+	for level := 1; level <= 2; level++ {
+		for id := range descendantsByLevel[level] {
+			result[Depth2][id] = true
+		}
+	}
+
+	// Depth3 = levels 1-3
+	result[Depth3] = make(map[string]bool)
+	for level := 1; level <= 3; level++ {
+		for id := range descendantsByLevel[level] {
+			result[Depth3][id] = true
+		}
+	}
+
+	// DepthAll = all levels
+	result[DepthAll] = make(map[string]bool)
+	for level := range descendantsByLevel {
+		for id := range descendantsByLevel[level] {
+			result[DepthAll][id] = true
+		}
+	}
+
+	return result
 }
 
 // buildGraphs builds the upstream and downstream dependency graphs
@@ -188,7 +563,8 @@ func (m *LabelDashboardModel) buildGraphs() {
 	// Build graphs from dependencies
 	for _, issue := range m.allIssues {
 		for _, dep := range issue.Dependencies {
-			if dep.Type == model.DepBlocks {
+			switch dep.Type {
+			case model.DepBlocks:
 				// issue depends on dep.DependsOnID (dep.DependsOnID blocks issue)
 				// So: dep.DependsOnID -> issue (downstream)
 				// And: issue <- dep.DependsOnID (upstream)
@@ -199,6 +575,14 @@ func (m *LabelDashboardModel) buildGraphs() {
 				if openIssues[dep.DependsOnID] && m.blockedByMap[issue.ID] == "" {
 					m.blockedByMap[issue.ID] = dep.DependsOnID
 				}
+
+			case model.DepParentChild:
+				// issue is a child of dep.DependsOnID (parent -> child relationship)
+				// So: dep.DependsOnID -> issue (downstream/children)
+				// And: issue <- dep.DependsOnID (upstream/parent)
+				m.downstream[dep.DependsOnID] = append(m.downstream[dep.DependsOnID], issue.ID)
+				m.upstream[issue.ID] = append(m.upstream[issue.ID], dep.DependsOnID)
+				// Note: parent-child doesn't create blocking relationships
 			}
 		}
 	}
@@ -217,14 +601,19 @@ func (m *LabelDashboardModel) buildTree() {
 
 	seen := make(map[string]bool)
 
+	// Get the depth-appropriate primary IDs
+	// This ensures Depth1 uses directPrimaryIDs for label mode,
+	// and depth-specific descendants for epic mode
+	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
+
 	// Find root nodes: primary issues that are "ready" (not blocked by open issues)
 	// Or at depth 1, just show all primary issues flat
 	var rootIssues []model.Issue
 
 	if m.dependencyDepth == Depth1 {
-		// Depth 1: flat list of primary issues only
+		// Depth 1: flat list of primary issues only (depth-appropriate)
 		for _, issue := range m.allIssues {
-			if m.primaryIDs[issue.ID] {
+			if depthPrimaryIDs[issue.ID] {
 				rootIssues = append(rootIssues, issue)
 			}
 		}
@@ -232,7 +621,7 @@ func (m *LabelDashboardModel) buildTree() {
 		// Depth 2+: find ready roots and build trees
 		// Roots are primary issues with no open blockers (or blockers outside primary set)
 		for _, issue := range m.allIssues {
-			if !m.primaryIDs[issue.ID] {
+			if !depthPrimaryIDs[issue.ID] {
 				continue
 			}
 
@@ -240,7 +629,7 @@ func (m *LabelDashboardModel) buildTree() {
 			isBlockedByPrimary := false
 			for _, blockerID := range m.upstream[issue.ID] {
 				if blocker, ok := m.issueMap[blockerID]; ok {
-					if blocker.Status != model.StatusClosed && m.primaryIDs[blockerID] {
+					if blocker.Status != model.StatusClosed && depthPrimaryIDs[blockerID] {
 						isBlockedByPrimary = true
 						break
 					}
@@ -255,15 +644,24 @@ func (m *LabelDashboardModel) buildTree() {
 		// If no roots found (all blocked), just use all primary issues
 		if len(rootIssues) == 0 {
 			for _, issue := range m.allIssues {
-				if m.primaryIDs[issue.ID] {
+				if depthPrimaryIDs[issue.ID] {
 					rootIssues = append(rootIssues, issue)
 				}
 			}
 		}
 	}
 
-	// Sort roots by status (ready first) then priority
+	// Sort roots: entry point first (when in epic or bead mode), then by status, then priority
 	sort.Slice(rootIssues, func(i, j int) bool {
+		// Entry point (epic or bead) always comes first
+		if (m.viewMode == "epic" || m.viewMode == "bead") && m.epicID != "" {
+			if rootIssues[i].ID == m.epicID {
+				return true
+			}
+			if rootIssues[j].ID == m.epicID {
+				return false
+			}
+		}
 		si := m.getStatusOrder(rootIssues[i])
 		sj := m.getStatusOrder(rootIssues[j])
 		if si != sj {
@@ -289,6 +687,12 @@ func (m *LabelDashboardModel) buildTree() {
 		}
 	}
 
+	// Add upstream context blockers that weren't reached via downstream traversal
+	// These are context issues that block primary issues but aren't downstream of any primary
+	if m.dependencyDepth != Depth1 {
+		m.addUpstreamContextBlockers(seen, maxDepth)
+	}
+
 	// Flatten tree for display
 	m.flattenTree()
 
@@ -310,9 +714,13 @@ func (m *LabelDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth i
 	}
 	seen[issue.ID] = true
 
+	// Use depth-appropriate primary IDs for IsPrimary determination
+	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
+
 	node := &TreeNode{
 		Issue:       issue,
-		IsPrimary:   m.primaryIDs[issue.ID],
+		IsPrimary:   depthPrimaryIDs[issue.ID],
+		IsEntryEpic: (m.viewMode == "epic" || m.viewMode == "bead") && issue.ID == m.epicID,
 		Depth:       depth,
 		IsLastChild: isLast,
 		ParentPath:  append([]bool{}, parentPath...),
@@ -361,6 +769,193 @@ func (m *LabelDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth i
 		for i, child := range childIssues {
 			childIsLast := i == len(childIssues)-1
 			childNode := m.buildTreeNode(child, depth+1, maxDepth, seen, childIsLast, newParentPath)
+			if childNode != nil {
+				node.Children = append(node.Children, childNode)
+			}
+		}
+	}
+
+	return node
+}
+
+// addUpstreamContextBlockers finds context issues that block primaries but weren't
+// included via downstream traversal, and adds them to the tree.
+// This ensures parity with workstream view which includes both directions.
+func (m *LabelDashboardModel) addUpstreamContextBlockers(seen map[string]bool, maxDepth int) {
+	// Use depth-appropriate primary IDs
+	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
+
+	// Find all context issues that block any primary issue (directly or transitively)
+	var contextBlockers []model.Issue
+
+	// First pass: find direct context blockers of primary issues
+	directBlockers := make(map[string]bool)
+	for _, issue := range m.allIssues {
+		if depthPrimaryIDs[issue.ID] {
+			// This is a primary - check its blockers
+			for _, blockerID := range m.upstream[issue.ID] {
+				if !depthPrimaryIDs[blockerID] && !seen[blockerID] {
+					// This is a context blocker not yet in the tree
+					directBlockers[blockerID] = true
+				}
+			}
+		}
+	}
+
+	// BFS to find transitive context blockers (blockers of blockers)
+	// AND their parent-child descendants (children of context blockers)
+	toVisit := make([]string, 0, len(directBlockers))
+	for id := range directBlockers {
+		toVisit = append(toVisit, id)
+	}
+
+	allContextBlockers := make(map[string]bool)
+	for id := range directBlockers {
+		allContextBlockers[id] = true
+	}
+
+	for len(toVisit) > 0 {
+		current := toVisit[0]
+		toVisit = toVisit[1:]
+
+		// Find upstream blockers of this context issue
+		for _, blockerID := range m.upstream[current] {
+			if !depthPrimaryIDs[blockerID] && !seen[blockerID] && !allContextBlockers[blockerID] {
+				allContextBlockers[blockerID] = true
+				toVisit = append(toVisit, blockerID)
+			}
+		}
+
+	}
+
+	// Collect context blocker issues
+	for _, issue := range m.allIssues {
+		if allContextBlockers[issue.ID] {
+			contextBlockers = append(contextBlockers, issue)
+		}
+	}
+
+	if len(contextBlockers) == 0 {
+		return
+	}
+
+	// Sort by status (ready first) then priority
+	sort.Slice(contextBlockers, func(i, j int) bool {
+		si := m.getStatusOrder(contextBlockers[i])
+		sj := m.getStatusOrder(contextBlockers[j])
+		if si != sj {
+			return si < sj
+		}
+		return contextBlockers[i].Priority < contextBlockers[j].Priority
+	})
+
+	// Find context blockers that are "roots" (not blocked by other unseen context blockers)
+	contextRoots := make([]model.Issue, 0)
+	for _, issue := range contextBlockers {
+		if seen[issue.ID] {
+			continue
+		}
+
+		isBlockedByUnseen := false
+		for _, blockerID := range m.upstream[issue.ID] {
+			if allContextBlockers[blockerID] && !seen[blockerID] {
+				isBlockedByUnseen = true
+				break
+			}
+		}
+
+		if !isBlockedByUnseen {
+			contextRoots = append(contextRoots, issue)
+		}
+	}
+
+	// If no roots found, just use all unseen context blockers
+	if len(contextRoots) == 0 {
+		for _, issue := range contextBlockers {
+			if !seen[issue.ID] {
+				contextRoots = append(contextRoots, issue)
+			}
+		}
+	}
+
+	// Build tree nodes for context blockers
+	// These will follow downstream within the context blocker set
+	numExistingRoots := len(m.roots)
+	for i, issue := range contextRoots {
+		if seen[issue.ID] {
+			continue
+		}
+		isLast := (numExistingRoots == 0) && (i == len(contextRoots)-1)
+		node := m.buildContextBlockerNode(issue, 0, maxDepth, seen, isLast, nil, allContextBlockers)
+		if node != nil {
+			m.roots = append(m.roots, node)
+		}
+	}
+}
+
+// buildContextBlockerNode builds a tree node for context blockers,
+// following downstream within the context blocker set
+func (m *LabelDashboardModel) buildContextBlockerNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, contextBlockerSet map[string]bool) *TreeNode {
+	if seen[issue.ID] {
+		return nil
+	}
+	seen[issue.ID] = true
+
+	// Use depth-appropriate primary IDs for IsPrimary determination
+	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
+
+	node := &TreeNode{
+		Issue:       issue,
+		IsPrimary:   depthPrimaryIDs[issue.ID],
+		Depth:       depth,
+		IsLastChild: isLast,
+		ParentPath:  append([]bool{}, parentPath...),
+	}
+
+	// Update stats
+	m.totalCount++
+	if node.IsPrimary {
+		m.primaryCount++
+	} else {
+		m.contextCount++
+	}
+
+	status := m.getIssueStatus(issue)
+	switch status {
+	case "ready":
+		m.readyCount++
+	case "blocked":
+		m.blockedCount++
+	case "closed":
+		m.closedCount++
+	}
+
+	// Add children (downstream issues within context blocker set) if within depth
+	if depth < maxDepth-1 {
+		var childIssues []model.Issue
+		for _, childID := range m.downstream[issue.ID] {
+			if child, ok := m.issueMap[childID]; ok {
+				// Only include if it's a context blocker and not yet seen
+				if contextBlockerSet[childID] && !seen[childID] {
+					childIssues = append(childIssues, *child)
+				}
+			}
+		}
+
+		// Sort children by status then priority
+		sort.Slice(childIssues, func(i, j int) bool {
+			si := m.getStatusOrder(childIssues[i])
+			sj := m.getStatusOrder(childIssues[j])
+			if si != sj {
+				return si < sj
+			}
+			return childIssues[i].Priority < childIssues[j].Priority
+		})
+
+		newParentPath := append(parentPath, isLast)
+		for i, child := range childIssues {
+			childIsLast := i == len(childIssues)-1
+			childNode := m.buildContextBlockerNode(child, depth+1, maxDepth, seen, childIsLast, newParentPath, contextBlockerSet)
 			if childNode != nil {
 				node.Children = append(node.Children, childNode)
 			}
@@ -431,6 +1026,10 @@ func (m *LabelDashboardModel) getIssueStatus(issue model.Issue) string {
 	if issue.Status == model.StatusInProgress {
 		return "in_progress"
 	}
+	// Check explicit blocked status first, then blocking dependencies
+	if issue.Status == model.StatusBlocked {
+		return "blocked"
+	}
 	if m.blockedByMap[issue.ID] != "" {
 		return "blocked"
 	}
@@ -471,11 +1070,86 @@ func (m *LabelDashboardModel) CycleDepth() {
 
 	// Rebuild tree with new depth
 	m.buildTree()
+
+	// Recompute workstreams with depth-appropriate primaryIDs
+	m.recomputeWorkstreams()
+}
+
+// GetPrimaryIDsForDepth returns the appropriate primaryIDs for the current depth.
+// At Depth1, returns only direct label matches.
+// At Depth2+, returns expanded set including descendants.
+func (m *LabelDashboardModel) GetPrimaryIDsForDepth() map[string]bool {
+	// Epic and bead modes: use depth-specific descendant maps
+	if (m.viewMode == "epic" || m.viewMode == "bead") && m.epicDescendantsByDepth != nil {
+		if depthSet, ok := m.epicDescendantsByDepth[m.dependencyDepth]; ok {
+			return depthSet
+		}
+		// Fallback to all descendants for unknown depth
+		return m.primaryIDs
+	}
+
+	// Label mode:
+	// - Depth1: only issues with the label directly applied
+	// - Depth2+: expanded set including descendants
+	if m.dependencyDepth == Depth1 {
+		return m.directPrimaryIDs
+	}
+	return m.primaryIDs
+}
+
+// recomputeWorkstreams detects workstreams using depth-appropriate primaryIDs
+// and the same issue set that flat view shows (primary + context blockers)
+func (m *LabelDashboardModel) recomputeWorkstreams() {
+	selectedLabel := m.labelName
+	primaryIDs := m.GetPrimaryIDsForDepth()
+
+	// Get the same issue set that flat view shows
+	// This ensures flat and workstream views display the same issues
+	displayIssues := m.getDisplayIssues()
+
+	workstreams := analysis.DetectWorkstreams(displayIssues, primaryIDs, selectedLabel)
+	m.SetWorkstreams(workstreams)
+}
+
+// getDisplayIssues returns the issues that should be displayed in the current view.
+// This is the union of primary issues (depth-appropriate) and context blockers.
+// Used to ensure flat and workstream views show the same issue set.
+func (m *LabelDashboardModel) getDisplayIssues() []model.Issue {
+	// If flatNodes is populated, extract issues from there
+	// This ensures we get exactly what flat view would show
+	if len(m.flatNodes) > 0 {
+		seen := make(map[string]bool)
+		issues := make([]model.Issue, 0, len(m.flatNodes))
+		for _, fn := range m.flatNodes {
+			if !seen[fn.Node.Issue.ID] {
+				seen[fn.Node.Issue.ID] = true
+				issues = append(issues, fn.Node.Issue)
+			}
+		}
+		return issues
+	}
+
+	// Fallback: return depth-appropriate primary issues only
+	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
+	issues := make([]model.Issue, 0)
+	for _, issue := range m.allIssues {
+		if depthPrimaryIDs[issue.ID] {
+			issues = append(issues, issue)
+		}
+	}
+	return issues
 }
 
 // GetDepth returns the current depth setting
 func (m *LabelDashboardModel) GetDepth() DepthOption {
 	return m.dependencyDepth
+}
+
+// SetDepth sets the dependency depth and rebuilds the tree
+func (m *LabelDashboardModel) SetDepth(depth DepthOption) {
+	m.dependencyDepth = depth
+	m.buildTree()
+	m.recomputeWorkstreams()
 }
 
 // SetSize updates the dashboard dimensions
@@ -858,9 +1532,37 @@ func (m *LabelDashboardModel) WorkstreamCount() int {
 
 // SetWorkstreams sets the detected workstreams
 func (m *LabelDashboardModel) SetWorkstreams(ws []analysis.Workstream) {
+	// In epic mode, sort workstream containing the entry epic to the front
+	if m.viewMode == "epic" && m.epicID != "" && len(ws) > 1 {
+		sort.SliceStable(ws, func(i, j int) bool {
+			// Check if workstream i contains the entry epic
+			for _, issue := range ws[i].Issues {
+				if issue.ID == m.epicID {
+					return true
+				}
+			}
+			// Check if workstream j contains the entry epic
+			for _, issue := range ws[j].Issues {
+				if issue.ID == m.epicID {
+					return false
+				}
+			}
+			return false // Keep original order otherwise
+		})
+	}
+
 	m.workstreams = ws
 	m.workstreamCount = len(ws)
-	m.wsExpanded = make(map[int]bool) // Reset expansion state
+	m.wsExpanded = make(map[int]bool)   // Reset expansion state
+	m.subWSExpanded = make(map[int]map[int]bool) // Reset sub-workstream expansion
+	m.subWsCursor = make(map[int]int)   // Reset sub-workstream cursors
+	m.wsSubdivided = false              // Reset subdivision state
+	m.workstreamPtrs = analysis.WorkstreamPointers(ws) // Create pointers for mutation
+}
+
+// isEntryEpic checks if an issue ID is the entry point (for epic or bead view modes)
+func (m *LabelDashboardModel) isEntryEpic(issueID string) bool {
+	return (m.viewMode == "epic" || m.viewMode == "bead") && m.epicID != "" && issueID == m.epicID
 }
 
 // ToggleWorkstreamExpand toggles expansion of the current workstream
@@ -912,6 +1614,65 @@ func (m *LabelDashboardModel) ToggleWSTreeView() {
 // IsWSTreeView returns true if showing dependency tree in workstream view
 func (m *LabelDashboardModel) IsWSTreeView() bool {
 	return m.wsTreeView
+}
+
+// === Sub-Workstream Support ===
+
+// ToggleSubdivision toggles subdivision mode on/off
+func (m *LabelDashboardModel) ToggleSubdivision() {
+	m.wsSubdivided = !m.wsSubdivided
+	if m.wsSubdivided && len(m.workstreamPtrs) > 0 {
+		// Apply subdivision to all workstreams
+		opts := analysis.DefaultGroupingOptions()
+		analysis.SubdivideAll(m.workstreamPtrs, m.primaryIDs, opts)
+	}
+	// Reset sub-workstream cursor when toggling
+	m.subWsCursor = make(map[int]int)
+	m.subWSExpanded = make(map[int]map[int]bool)
+}
+
+// IsSubdivided returns true if subdivision is active
+func (m *LabelDashboardModel) IsSubdivided() bool {
+	return m.wsSubdivided
+}
+
+// GetWorkstreamPointers returns pointers to workstreams for mutation
+func (m *LabelDashboardModel) GetWorkstreamPointers() []*analysis.Workstream {
+	return m.workstreamPtrs
+}
+
+// HasSubWorkstreams returns true if the given workstream has children
+func (m *LabelDashboardModel) HasSubWorkstreams(wsIdx int) bool {
+	if wsIdx >= len(m.workstreamPtrs) || m.workstreamPtrs[wsIdx] == nil {
+		return false
+	}
+	return len(m.workstreamPtrs[wsIdx].SubWorkstreams) > 0
+}
+
+// IsSubWorkstreamExpanded returns whether a sub-workstream is expanded
+func (m *LabelDashboardModel) IsSubWorkstreamExpanded(wsIdx, subIdx int) bool {
+	if m.subWSExpanded[wsIdx] == nil {
+		return false
+	}
+	return m.subWSExpanded[wsIdx][subIdx]
+}
+
+// ToggleSubWorkstreamExpand toggles expansion of a sub-workstream
+func (m *LabelDashboardModel) ToggleSubWorkstreamExpand(wsIdx, subIdx int) {
+	if m.subWSExpanded[wsIdx] == nil {
+		m.subWSExpanded[wsIdx] = make(map[int]bool)
+	}
+	m.subWSExpanded[wsIdx][subIdx] = !m.subWSExpanded[wsIdx][subIdx]
+}
+
+// GetSubWorkstreamCursor returns the sub-workstream cursor for a workstream
+func (m *LabelDashboardModel) GetSubWorkstreamCursor(wsIdx int) int {
+	return m.subWsCursor[wsIdx]
+}
+
+// SetSubWorkstreamCursor sets the sub-workstream cursor for a workstream
+func (m *LabelDashboardModel) SetSubWorkstreamCursor(wsIdx, cursor int) {
+	m.subWsCursor[wsIdx] = cursor
 }
 
 // GetWsCursor returns the current workstream cursor position
@@ -1133,8 +1894,11 @@ func (m *LabelDashboardModel) View() string {
 		Bold(true)
 
 	modeIcon := ""
-	if m.viewMode == "epic" {
+	switch m.viewMode {
+	case "epic":
 		modeIcon = "📋 "
+	case "bead":
+		modeIcon = "🔷 "
 	}
 
 	// Progress bar
@@ -1235,7 +1999,7 @@ func (m *LabelDashboardModel) View() string {
 		if m.wsTreeView {
 			treeHint = " • D: list • d: depth"
 		} else {
-			treeHint = " • D: tree"
+			treeHint = " • d: tree"
 		}
 	}
 
@@ -1287,14 +2051,42 @@ func (m *LabelDashboardModel) renderWorkstreamView(contentWidth, visibleLines in
 			headerStyle = wsHeaderSelectedStyle
 		}
 
-		wsLine := fmt.Sprintf("%s%s %s %s %d%% %s",
+		// Show sub-workstream indicator if present
+		subWsIndicator := ""
+		if m.wsSubdivided && wsIdx < len(m.workstreamPtrs) && m.workstreamPtrs[wsIdx] != nil {
+			subCount := len(m.workstreamPtrs[wsIdx].SubWorkstreams)
+			if subCount > 0 {
+				subWsIndicator = fmt.Sprintf(" [%d sub]", subCount)
+			}
+		}
+
+		wsLine := fmt.Sprintf("%s%s %s %s %d%% %s%s",
 			selectPrefix,
 			expandIcon,
 			headerStyle.Render(ws.Name),
 			progressBar,
 			progressPct,
-			wsSubStyle.Render(statusCounts))
+			wsSubStyle.Render(statusCounts),
+			wsSubStyle.Render(subWsIndicator))
 		allLines = append(allLines, wsLine)
+
+		// Render sub-workstreams when subdivision is active and expanded
+		if m.wsSubdivided && isExpanded && wsIdx < len(m.workstreamPtrs) && m.workstreamPtrs[wsIdx] != nil {
+			for subIdx, subWs := range m.workstreamPtrs[wsIdx].SubWorkstreams {
+				if subWs == nil {
+					continue
+				}
+				subProgress := int(subWs.Progress * 100)
+				subStatusCounts := fmt.Sprintf("○%d ●%d ◈%d ✓%d",
+					subWs.ReadyCount, subWs.InProgressCount, subWs.BlockedCount, subWs.ClosedCount)
+				subLine := fmt.Sprintf("      %s (%d%%) %s",
+					wsSubStyle.Render("├─ "+subWs.Name),
+					subProgress,
+					wsSubStyle.Render(subStatusCounts))
+				_ = subIdx // Will be used for sub-workstream selection in future
+				allLines = append(allLines, subLine)
+			}
+		}
 
 		// Render issues - either as tree or flat list
 		if m.wsTreeView && isExpanded {
@@ -1306,29 +2098,41 @@ func (m *LabelDashboardModel) renderWorkstreamView(contentWidth, visibleLines in
 			for i, fn := range flatNodes {
 				// Check if this issue is selected
 				isIssueSelected := wsIdx == m.wsCursor && i == m.wsIssueCursor
+				isEpicEntry := m.isEntryEpic(fn.Node.Issue.ID)
 
 				// Format issue line with tree prefix
 				var statusIcon string
 				var style lipgloss.Style
-				switch fn.Node.Issue.Status {
-				case model.StatusClosed:
-					statusIcon = "✓"
-					style = closedStyle
-				case model.StatusBlocked:
-					statusIcon = "◈"
-					style = blockedStyle
-				case model.StatusInProgress:
-					statusIcon = "●"
-					style = inProgStyle
-				default:
-					statusIcon = "○"
-					style = readyStyle
+				if isEpicEntry {
+					// Entry epic gets distinct diamond icon
+					statusIcon = "◆"
+					style = t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+				} else {
+					switch fn.Node.Issue.Status {
+					case model.StatusClosed:
+						statusIcon = "✓"
+						style = closedStyle
+					case model.StatusBlocked:
+						statusIcon = "◈"
+						style = blockedStyle
+					case model.StatusInProgress:
+						statusIcon = "●"
+						style = inProgStyle
+					default:
+						statusIcon = "○"
+						style = readyStyle
+					}
 				}
 
 				// Selection indicator
 				issuePrefix := "    "
 				idStyle := issueStyle
 				titleStyle := issueStyle
+				if isEpicEntry {
+					// Entry epic: always bold primary
+					idStyle = issueSelectedStyle.Foreground(t.Primary)
+					titleStyle = issueSelectedStyle.Foreground(t.Primary)
+				}
 				if isIssueSelected {
 					issuePrefix = "  ▸ "
 					idStyle = issueSelectedStyle.Foreground(t.Primary)
@@ -1342,12 +2146,17 @@ func (m *LabelDashboardModel) renderWorkstreamView(contentWidth, visibleLines in
 				}
 
 				title := truncateRunesHelper(fn.Node.Issue.Title, contentWidth-25-len(fn.TreePrefix), "…")
-				issueLine := fmt.Sprintf("%s%s %s%s %s",
+				epicBadge := ""
+				if isEpicEntry {
+					epicBadge = wsSubStyle.Render(" [EPIC]")
+				}
+				issueLine := fmt.Sprintf("%s%s %s%s %s%s",
 					issuePrefix,
 					style.Render(statusIcon),
 					treePrefix,
 					idStyle.Render(fn.Node.Issue.ID),
-					titleStyle.Render(title))
+					titleStyle.Render(title),
+					epicBadge)
 				allLines = append(allLines, issueLine)
 			}
 		} else {
@@ -1361,29 +2170,41 @@ func (m *LabelDashboardModel) renderWorkstreamView(contentWidth, visibleLines in
 
 				// Check if this issue is selected
 				isIssueSelected := wsIdx == m.wsCursor && i == m.wsIssueCursor
+				isEpicEntry := m.isEntryEpic(issue.ID)
 
 				// Format issue line
 				var statusIcon string
 				var style lipgloss.Style
-				switch issue.Status {
-				case model.StatusClosed:
-					statusIcon = "✓"
-					style = closedStyle
-				case model.StatusBlocked:
-					statusIcon = "◈"
-					style = blockedStyle
-				case model.StatusInProgress:
-					statusIcon = "●"
-					style = inProgStyle
-				default:
-					statusIcon = "○"
-					style = readyStyle
+				if isEpicEntry {
+					// Entry epic gets distinct diamond icon
+					statusIcon = "◆"
+					style = t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+				} else {
+					switch issue.Status {
+					case model.StatusClosed:
+						statusIcon = "✓"
+						style = closedStyle
+					case model.StatusBlocked:
+						statusIcon = "◈"
+						style = blockedStyle
+					case model.StatusInProgress:
+						statusIcon = "●"
+						style = inProgStyle
+					default:
+						statusIcon = "○"
+						style = readyStyle
+					}
 				}
 
 				// Selection indicator
 				issuePrefix := "    "
 				idStyle := issueStyle
 				titleStyle := issueStyle
+				if isEpicEntry {
+					// Entry epic: always bold primary
+					idStyle = issueSelectedStyle.Foreground(t.Primary)
+					titleStyle = issueSelectedStyle.Foreground(t.Primary)
+				}
 				if isIssueSelected {
 					issuePrefix = "  ▸ "
 					idStyle = issueSelectedStyle.Foreground(t.Primary)
@@ -1391,11 +2212,16 @@ func (m *LabelDashboardModel) renderWorkstreamView(contentWidth, visibleLines in
 				}
 
 				title := truncateRunesHelper(issue.Title, contentWidth-20, "…")
-				issueLine := fmt.Sprintf("%s%s %s %s",
+				epicBadge := ""
+				if isEpicEntry {
+					epicBadge = wsSubStyle.Render(" [EPIC]")
+				}
+				issueLine := fmt.Sprintf("%s%s %s %s%s",
 					issuePrefix,
 					style.Render(statusIcon),
 					idStyle.Render(issue.ID),
-					titleStyle.Render(title))
+					titleStyle.Render(title),
+					epicBadge)
 				allLines = append(allLines, issueLine)
 			}
 
@@ -1414,6 +2240,9 @@ func (m *LabelDashboardModel) renderWorkstreamView(contentWidth, visibleLines in
 	viewModeStr := "list"
 	if m.wsTreeView {
 		viewModeStr = fmt.Sprintf("tree [depth:%s]", m.dependencyDepth.String())
+	}
+	if m.wsSubdivided {
+		viewModeStr += " [subdivided]"
 	}
 	lines = append(lines, wsSubStyle.Render(fmt.Sprintf("  %d workstreams (%s):", len(m.workstreams), viewModeStr)))
 	lines = append(lines, "")
@@ -1508,9 +2337,12 @@ func (m *LabelDashboardModel) renderTreeNode(fn FlatNode, isSelected bool, maxWi
 		selectPrefix = "▸ "
 	}
 
-	// Primary/context indicator
+	// Primary/context/entry-epic indicator
 	var indicator string
-	if node.IsPrimary {
+	if node.IsEntryEpic {
+		// Entry epic gets a distinct diamond icon
+		indicator = t.Renderer.NewStyle().Foreground(t.Primary).Bold(true).Render("◆")
+	} else if node.IsPrimary {
 		indicator = t.Renderer.NewStyle().Foreground(t.Primary).Render("●")
 	} else {
 		indicator = t.Renderer.NewStyle().Foreground(t.Secondary).Render("○")
@@ -1526,7 +2358,11 @@ func (m *LabelDashboardModel) renderTreeNode(fn FlatNode, isSelected bool, maxWi
 	idStyle := t.Renderer.NewStyle()
 	titleStyle := t.Renderer.NewStyle()
 
-	if isSelected {
+	if node.IsEntryEpic {
+		// Entry epic: bold with primary color, stands out
+		idStyle = idStyle.Foreground(t.Primary).Bold(true)
+		titleStyle = titleStyle.Foreground(t.Primary).Bold(true)
+	} else if isSelected {
 		idStyle = idStyle.Foreground(t.Primary).Bold(true)
 		titleStyle = titleStyle.Foreground(t.Primary).Bold(true)
 	} else if !node.IsPrimary {
@@ -1545,6 +2381,12 @@ func (m *LabelDashboardModel) renderTreeNode(fn FlatNode, isSelected bool, maxWi
 	}
 	title := truncateRunesHelper(node.Issue.Title, maxTitleLen, "…")
 
+	// Entry epic badge
+	epicBadge := ""
+	if node.IsEntryEpic {
+		epicBadge = t.Renderer.NewStyle().Foreground(t.Subtext).Render(" [EPIC]")
+	}
+
 	// Status indicator for blocked items
 	statusSuffix := ""
 	if fn.Status == "blocked" && fn.BlockedBy != "" {
@@ -1552,12 +2394,13 @@ func (m *LabelDashboardModel) renderTreeNode(fn FlatNode, isSelected bool, maxWi
 		statusSuffix = blockerStyle.Render(" ◄ " + fn.BlockedBy)
 	}
 
-	return fmt.Sprintf("%s%s %s%s %s%s",
+	return fmt.Sprintf("%s%s %s%s %s%s%s",
 		selectPrefix,
 		indicator,
 		treePrefix,
 		idStyle.Render(node.Issue.ID),
 		titleStyle.Render(title),
+		epicBadge,
 		statusSuffix)
 }
 
@@ -1580,4 +2423,123 @@ func (m *LabelDashboardModel) renderProgressBar(progress float64, width int) str
 
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 	return t.Renderer.NewStyle().Foreground(barColor).Render("[" + bar + "]")
+}
+
+// DumpToFile writes workstream information to a text file
+func (m *LabelDashboardModel) DumpToFile() (string, error) {
+	filename := fmt.Sprintf("%s-dump.txt", m.labelName)
+
+	var buf strings.Builder
+
+	// Header
+	buf.WriteString(fmt.Sprintf("Label Dashboard Dump: %s\n", m.labelName))
+	buf.WriteString(fmt.Sprintf("Generated: %s\n", time.Now().Format(time.RFC3339)))
+	buf.WriteString(strings.Repeat("=", 60) + "\n\n")
+
+	// Summary stats
+	buf.WriteString("SUMMARY\n")
+	buf.WriteString(strings.Repeat("-", 40) + "\n")
+	buf.WriteString(fmt.Sprintf("  Total: %d issues (%d primary, %d context)\n",
+		m.totalCount, m.primaryCount, m.contextCount))
+	buf.WriteString(fmt.Sprintf("  Ready: %d, Blocked: %d, In Progress: %d, Closed: %d\n",
+		m.readyCount, m.blockedCount,
+		m.totalCount-m.readyCount-m.blockedCount-m.closedCount, m.closedCount))
+	progress := 0.0
+	if m.totalCount > 0 {
+		progress = float64(m.closedCount) / float64(m.totalCount)
+	}
+	buf.WriteString(fmt.Sprintf("  Progress: %d%%\n", int(progress*100)))
+	buf.WriteString(fmt.Sprintf("  Dependency Depth: %s\n\n", m.dependencyDepth.String()))
+
+	// Workstream hierarchy (if workstreams exist)
+	if len(m.workstreamPtrs) > 0 {
+		buf.WriteString("WORKSTREAMS (Hierarchical)\n")
+		buf.WriteString(strings.Repeat("-", 40) + "\n")
+		for _, ws := range m.workstreamPtrs {
+			if ws != nil {
+				buf.WriteString(m.dumpWorkstreamTree(ws, 0))
+			}
+		}
+		buf.WriteString("\n")
+	}
+
+	// Flat output by depth
+	buf.WriteString("ISSUES BY DEPTH\n")
+	buf.WriteString(strings.Repeat("-", 40) + "\n")
+	buf.WriteString(m.dumpFlatByDepth())
+
+	return filename, os.WriteFile(filename, []byte(buf.String()), 0644)
+}
+
+// dumpWorkstreamTree recursively dumps a workstream and its sub-workstreams
+func (m *LabelDashboardModel) dumpWorkstreamTree(ws *analysis.Workstream, indent int) string {
+	var buf strings.Builder
+	prefix := strings.Repeat("  ", indent)
+
+	// Workstream header
+	buf.WriteString(fmt.Sprintf("%s[%s] %s (%d issues, %d%% done)\n",
+		prefix, ws.ID, ws.Name, len(ws.Issues), int(ws.Progress*100)))
+	buf.WriteString(fmt.Sprintf("%s  Ready: %d, Blocked: %d, In Progress: %d, Closed: %d\n",
+		prefix, ws.ReadyCount, ws.BlockedCount, ws.InProgressCount, ws.ClosedCount))
+
+	if ws.GroupedBy != "" {
+		buf.WriteString(fmt.Sprintf("%s  Grouped by: %s\n", prefix, ws.GroupedBy))
+	}
+
+	// Issues in this workstream
+	if len(ws.Issues) > 0 {
+		buf.WriteString(fmt.Sprintf("%s  Issues:\n", prefix))
+		for _, issue := range ws.Issues {
+			buf.WriteString(fmt.Sprintf("%s    - [%s] %s (%s)\n",
+				prefix, issue.ID, issue.Title, issue.Status))
+		}
+	}
+
+	// Recurse into sub-workstreams
+	if len(ws.SubWorkstreams) > 0 {
+		buf.WriteString(fmt.Sprintf("%s  Sub-workstreams (%d):\n", prefix, len(ws.SubWorkstreams)))
+		for _, subWs := range ws.SubWorkstreams {
+			buf.WriteString(m.dumpWorkstreamTree(subWs, indent+1))
+		}
+	}
+
+	buf.WriteString("\n")
+	return buf.String()
+}
+
+// dumpFlatByDepth groups issues by their depth in the tree
+func (m *LabelDashboardModel) dumpFlatByDepth() string {
+	var buf strings.Builder
+
+	// Group all issues by their depth
+	depthMap := make(map[int][]model.Issue)
+	maxDepth := 0
+
+	for _, fn := range m.flatNodes {
+		depth := fn.Node.Depth
+		depthMap[depth] = append(depthMap[depth], fn.Node.Issue)
+		if depth > maxDepth {
+			maxDepth = depth
+		}
+	}
+
+	for depth := 0; depth <= maxDepth; depth++ {
+		issues := depthMap[depth]
+		if len(issues) > 0 {
+			buf.WriteString(fmt.Sprintf("\nDepth %d (%d issues):\n", depth, len(issues)))
+			for _, issue := range issues {
+				statusStr := issue.Status
+				if statusStr == "" {
+					statusStr = "open"
+				}
+				buf.WriteString(fmt.Sprintf("  [%s] %s (%s)\n", issue.ID, issue.Title, statusStr))
+			}
+		}
+	}
+
+	if len(m.flatNodes) == 0 {
+		buf.WriteString("\n  No issues in current view\n")
+	}
+
+	return buf.String()
 }
