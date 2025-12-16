@@ -78,6 +78,7 @@ Don't just read the title. `bv` gives you the full picture:
 
 ### 🛠️ Quick Actions
 *   **Export:** Press `E` to export all issues to a timestamped Markdown file with Mermaid diagrams.
+*   **Graph Snapshot (CLI):** `bv --export-graph graph.svg` (or `.png`) writes a static image of the current dependency graph plus a mini summary block (data hash, node/edge counts, top bottleneck). Honors recipes/workspace filters and supports spacing presets via `--graph-preset compact|roomy`.
 *   **Copy:** Press `C` to copy the selected issue as formatted Markdown to your clipboard.
 *   **Edit:** Press `O` to open the `.beads/beads.jsonl` file in your preferred GUI editor.
 *   **Time-Travel:** Press `t` to compare against any git revision, or `T` for quick HEAD~5 comparison.
@@ -519,6 +520,23 @@ graph TD
     linkStyle 1 stroke:#81c784,stroke-width:2px
     linkStyle 2 stroke:#e57373,stroke-width:1px,stroke-dasharray:5
 ```
+
+---
+
+## 📸 Graph Snapshot Export (PNG/SVG)
+
+Need a quick, shareable picture of the dependency graph for another agent or a status deck? Run:
+
+```bash
+bv --export-graph out/graph.svg         # format inferred from extension
+bv --export-graph out/graph.png --graph-preset roomy
+```
+
+Features:
+- **Self-contained summary block:** embeds `data_hash`, node/edge counts, and the top bottleneck so artifacts can be correlated with robot outputs.
+- **Recipe-aware:** applies the same filters you passed via `--recipe`/`--workspace`, keeping exports scoped.
+- **Legend + colors:** status-colored nodes (open/in-progress/blocked/closed) and a concise legend so agents understand the encoding without rereading this README.
+- **Deterministic layout:** stable ordering by critical-path level then PageRank, so two exports for the same data hash look identical.
 
 ---
 
