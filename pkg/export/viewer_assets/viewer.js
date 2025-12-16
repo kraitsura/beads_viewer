@@ -215,6 +215,121 @@ function enableFallbackMode(reason) {
   showToast('Using pre-computed metrics only', 'warning');
 }
 
+// ============================================================================
+// WASM Memory Management
+// ============================================================================
+
+/**
+ * Track allocated WASM objects for cleanup
+ * WASM objects allocated via wasm-bindgen are NOT garbage collected by JS
+ */
+const WASM_ALLOCATIONS = {
+  subgraphs: [],   // Temporary subgraph objects
+  trackCount: 0,   // Total allocations tracked
+  freedCount: 0,   // Total objects freed
+};
+
+/**
+ * Safely execute a function with a temporary subgraph, ensuring cleanup
+ *
+ * Example usage:
+ *   const result = withSubgraph(indices, subgraph => ({
+ *     pagerank: subgraph.pagerankDefault(),
+ *     betweenness: subgraph.betweenness(),
+ *   }));
+ *
+ * @param {Uint32Array|number[]} indices - Node indices for the subgraph
+ * @param {Function} fn - Function to execute with the subgraph
+ * @returns {*} Result from the function
+ */
+function withSubgraph(indices, fn) {
+  if (!GRAPH_STATE.ready || !GRAPH_STATE.graph) {
+    console.warn('[WASM Memory] Cannot create subgraph: graph not ready');
+    return null;
+  }
+
+  const indicesArray = indices instanceof Uint32Array
+    ? indices
+    : new Uint32Array(indices);
+
+  const subgraph = GRAPH_STATE.graph.subgraph(indicesArray);
+  WASM_ALLOCATIONS.trackCount++;
+
+  try {
+    return fn(subgraph);
+  } finally {
+    // Always free the subgraph, even if fn throws
+    if (subgraph && typeof subgraph.free === 'function') {
+      subgraph.free();
+      WASM_ALLOCATIONS.freedCount++;
+    }
+  }
+}
+
+/**
+ * Clean up all WASM resources
+ * Call on page unload or when reinitializing
+ */
+function cleanupWasm() {
+  console.log('[WASM Memory] Cleaning up resources...');
+
+  // Free tracked subgraphs (shouldn't be any if withSubgraph is used correctly)
+  for (const subgraph of WASM_ALLOCATIONS.subgraphs) {
+    if (subgraph && typeof subgraph.free === 'function') {
+      try {
+        subgraph.free();
+        WASM_ALLOCATIONS.freedCount++;
+      } catch (e) {
+        console.warn('[WASM Memory] Error freeing subgraph:', e);
+      }
+    }
+  }
+  WASM_ALLOCATIONS.subgraphs = [];
+
+  // Free the main graph
+  if (GRAPH_STATE.graph && typeof GRAPH_STATE.graph.free === 'function') {
+    try {
+      GRAPH_STATE.graph.free();
+      console.log('[WASM Memory] Main graph freed');
+    } catch (e) {
+      console.warn('[WASM Memory] Error freeing main graph:', e);
+    }
+    GRAPH_STATE.graph = null;
+    GRAPH_STATE.ready = false;
+    GRAPH_STATE.nodeMap = null;
+  }
+
+  console.log(`[WASM Memory] Cleanup complete. Tracked: ${WASM_ALLOCATIONS.trackCount}, Freed: ${WASM_ALLOCATIONS.freedCount}`);
+}
+
+/**
+ * Get WASM memory statistics for diagnostics
+ */
+function getWasmMemoryStats() {
+  return {
+    tracked: WASM_ALLOCATIONS.trackCount,
+    freed: WASM_ALLOCATIONS.freedCount,
+    pendingSubgraphs: WASM_ALLOCATIONS.subgraphs.length,
+    graphActive: GRAPH_STATE.graph !== null,
+    leakEstimate: WASM_ALLOCATIONS.trackCount - WASM_ALLOCATIONS.freedCount - WASM_ALLOCATIONS.subgraphs.length,
+  };
+}
+
+// Register cleanup on page unload
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    cleanupWasm();
+  });
+
+  // Also cleanup on visibility change (mobile browsers)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      // Could optionally free resources here for memory-constrained devices
+      // cleanupWasm();
+    }
+  });
+}
+
 /**
  * Initialize sql.js library
  */
@@ -622,17 +737,15 @@ function recalculateMetrics(issueIds) {
 
   if (indices.length === 0) return null;
 
-  // Extract subgraph for filtered issues
-  const subgraph = GRAPH_STATE.graph.subgraph(new Uint32Array(indices));
-
-  const result = {
+  // Extract subgraph for filtered issues - use withSubgraph for automatic cleanup
+  const result = withSubgraph(indices, subgraph => ({
     nodeCount: subgraph.nodeCount(),
     edgeCount: subgraph.edgeCount(),
     pagerank: subgraph.pagerankDefault(),
     betweenness: subgraph.betweenness(),
     hasCycles: subgraph.hasCycles(),
     criticalPath: subgraph.criticalPathHeights(),
-  };
+  }));
 
   const elapsed = performance.now() - start;
   console.log(`[Graph] Recalculated metrics in ${elapsed.toFixed(1)}ms`);
@@ -2106,6 +2219,12 @@ window.beadsViewer = {
   WASM_STATUS,
   checkWASMSupport,
   enableFallbackMode,
+
+  // WASM Memory Management
+  WASM_ALLOCATIONS,
+  withSubgraph,
+  cleanupWasm,
+  getWasmMemoryStats,
 
   // Insights helpers
   getTopByBetweenness,

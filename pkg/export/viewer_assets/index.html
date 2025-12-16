@@ -1409,6 +1409,34 @@
               </div>
             </div>
           </details>
+          <!-- WASM Memory (collapsed) -->
+          <details class="mt-2 text-xs">
+            <summary class="cursor-pointer text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">
+              WASM Memory
+            </summary>
+            <div class="mt-1 space-y-1 pl-2" x-data="{ memStats: window.beadsViewer?.getWasmMemoryStats?.() || {} }" x-init="setInterval(() => memStats = window.beadsViewer?.getWasmMemoryStats?.() || {}, 5000)">
+              <div class="flex items-center justify-between">
+                <span class="text-gray-500 dark:text-gray-400">Tracked</span>
+                <span class="text-gray-300" x-text="memStats.tracked || 0"></span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-gray-500 dark:text-gray-400">Freed</span>
+                <span class="text-gray-300" x-text="memStats.freed || 0"></span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-gray-500 dark:text-gray-400">Pending</span>
+                <span class="text-gray-300" x-text="memStats.pendingSubgraphs || 0"></span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-gray-500 dark:text-gray-400">Leak Est.</span>
+                <span :class="(memStats.leakEstimate || 0) > 0 ? 'text-yellow-500' : 'text-green-500'" x-text="memStats.leakEstimate || 0"></span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-gray-500 dark:text-gray-400">Graph Active</span>
+                <span :class="memStats.graphActive ? 'text-green-500' : 'text-gray-400'" x-text="memStats.graphActive ? 'Yes' : 'No'"></span>
+              </div>
+            </div>
+          </details>
         </div>
 
         <!-- Database Info -->
