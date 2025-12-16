@@ -63,12 +63,16 @@ type ExportMeta struct {
 	IssueCount  int       `json:"issue_count"`
 	DepCount    int       `json:"dependency_count"`
 	DataHash    string    `json:"data_hash,omitempty"`
+	Title       string    `json:"title,omitempty"`
 }
 
 // SQLiteExportConfig configures the SQLite export process.
 type SQLiteExportConfig struct {
 	// OutputDir is the directory to write export files
 	OutputDir string
+
+	// Title is a custom title for the static site
+	Title string
 
 	// ChunkThreshold is the file size (bytes) above which to chunk the database
 	// Default: 5MB
@@ -139,4 +143,20 @@ type ProjectHealth struct {
 	ByType          map[string]int `json:"by_type"`
 	ByPriority      map[int]int    `json:"by_priority"`
 	CycleCount      int            `json:"cycle_count,omitempty"`
+	Velocity        *Velocity      `json:"velocity,omitempty"`
+}
+
+// Velocity captures project-level throughput stats for exports/robots.
+type Velocity struct {
+	ClosedLast7Days  int            `json:"closed_last_7_days"`
+	ClosedLast30Days int            `json:"closed_last_30_days"`
+	AvgDaysToClose   float64        `json:"avg_days_to_close"`
+	Weekly           []VelocityWeek `json:"weekly,omitempty"`
+	Estimated        bool           `json:"estimated,omitempty"`
+}
+
+// VelocityWeek holds weekly bucketed closure counts (Monday-start UTC).
+type VelocityWeek struct {
+	WeekStart time.Time `json:"week_start"`
+	Closed    int       `json:"closed"`
 }

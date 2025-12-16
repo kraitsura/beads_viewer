@@ -557,7 +557,7 @@ func main() {
 
 		// Copy viewer assets
 		fmt.Println("  → Copying viewer assets...")
-		if err := copyViewerAssets(*exportPages); err != nil {
+		if err := copyViewerAssets(*exportPages, *pagesTitle); err != nil {
 			fmt.Fprintf(os.Stderr, "Error copying assets: %v\n", err)
 			os.Exit(1)
 		}
@@ -2445,7 +2445,8 @@ func buildAttentionReason(score analysis.LabelAttentionScore) string {
 // ============================================================================
 
 // copyViewerAssets copies the viewer HTML/JS/CSS assets to the output directory.
-func copyViewerAssets(outputDir string) error {
+// If title is provided, it replaces the default title in index.html.
+func copyViewerAssets(outputDir, title string) error {
 	// Get the path to the viewer assets embedded in the binary or relative to the executable
 	// For development, we look relative to the project root
 	// For production, assets should be embedded using go:embed
@@ -2468,6 +2469,14 @@ func copyViewerAssets(outputDir string) error {
 	for _, file := range files {
 		src := filepath.Join(assetsDir, file)
 		dst := filepath.Join(outputDir, file)
+
+		// Special handling for index.html to replace title
+		if file == "index.html" && title != "" {
+			if err := copyFileWithTitleReplacement(src, dst, title); err != nil {
+				return fmt.Errorf("copy %s: %w", file, err)
+			}
+			continue
+		}
 
 		if err := copyFile(src, dst); err != nil {
 			// Skip missing optional files
@@ -2534,6 +2543,20 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
+}
+
+// copyFileWithTitleReplacement copies a file while replacing the default title.
+func copyFileWithTitleReplacement(src, dst, title string) error {
+	content, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+
+	// Replace title in <title> tag and in the h1 header
+	result := strings.Replace(string(content), "<title>Beads Viewer</title>", "<title>"+title+"</title>", 1)
+	result = strings.Replace(result, `<h1 class="text-xl font-semibold">Beads Viewer</h1>`, `<h1 class="text-xl font-semibold">`+title+`</h1>`, 1)
+
+	return os.WriteFile(dst, []byte(result), 0644)
 }
 
 // copyDir recursively copies a directory.

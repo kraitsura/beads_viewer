@@ -334,6 +334,9 @@ func (e *SQLiteExporter) insertMeta(db *sql.DB) error {
 	if e.gitHash != "" {
 		meta["git_commit"] = e.gitHash
 	}
+	if e.Config.Title != "" {
+		meta["title"] = e.Config.Title
+	}
 
 	for key, value := range meta {
 		if err := InsertMetaValue(db, key, value); err != nil {
@@ -351,6 +354,11 @@ func (e *SQLiteExporter) writeRobotOutputs(dataDir string) error {
 		if err := writeJSON(filepath.Join(dataDir, "triage.json"), e.Triage); err != nil {
 			return fmt.Errorf("write triage.json: %w", err)
 		}
+
+		// Also emit a compact project_health.json for fast robot consumption
+		if err := writeJSON(filepath.Join(dataDir, "project_health.json"), e.Triage.ProjectHealth); err != nil {
+			return fmt.Errorf("write project_health.json: %w", err)
+		}
 	}
 
 	// Write export metadata
@@ -360,6 +368,7 @@ func (e *SQLiteExporter) writeRobotOutputs(dataDir string) error {
 		GitCommit:   e.gitHash,
 		IssueCount:  len(e.Issues),
 		DepCount:    len(e.Deps),
+		Title:       e.Config.Title,
 	}
 	if err := writeJSON(filepath.Join(dataDir, "meta.json"), meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)

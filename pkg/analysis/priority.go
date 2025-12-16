@@ -100,6 +100,9 @@ func (a *Analyzer) ComputeImpactScoresFromStats(stats *GraphStats, now time.Time
 	maxPR := findMax(pageRank)
 	maxBW := findMax(betweenness)
 	maxBlockers := findMaxInt(stats.InDegree)
+	if maxBlockers == 0 {
+		maxBlockers = 1 // avoid divide-by-zero; normalize to 0 when no blockers exist
+	}
 
 	// Compute median estimated minutes for issues without estimates
 	medianMinutes := a.computeMedianEstimatedMinutes()

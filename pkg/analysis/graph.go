@@ -918,9 +918,12 @@ func (a *Analyzer) computePhase1(stats *GraphStats) {
 		n := nodes.Node()
 		id := a.nodeToID[n.ID()]
 
+		// Edge direction: dependent -> dependency (A -> B means A depends on B)
+		// To(n) = nodes pointing TO n = issues that depend on n = n blocks them
 		to := a.g.To(n.ID())
 		stats.InDegree[id] = to.Len() // Issues depending on me
 
+		// From(n) = nodes n points TO = issues n depends on
 		from := a.g.From(n.ID())
 		stats.OutDegree[id] = from.Len() // Issues I depend on
 	}
@@ -972,222 +975,10 @@ func (a *Analyzer) computePhase2(stats *GraphStats, config AnalysisConfig) {
 		}
 	}()
 
-	// Compute all metrics to LOCAL variables first (no lock needed)
-	localPageRank := make(map[string]float64)
-	localBetweenness := make(map[string]float64)
-	localEigenvector := make(map[string]float64)
-	localHubs := make(map[string]float64)
-	localAuthorities := make(map[string]float64)
-	localCriticalPath := make(map[string]float64)
-	localCore := make(map[string]int)
-	localArticulation := make(map[string]bool)
-	localSlack := make(map[string]float64)
-	var localCycles [][]string
-
-	betweennessIsApprox := false
-	cyclesTruncated := false
-
-	// PageRank with timeout (if enabled)
-	if config.ComputePageRank {
-		prDone := make(chan map[int64]float64, 1)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Panic -> implicitly causes timeout in parent
-				}
-			}()
-			prDone <- network.PageRank(a.g, 0.85, 1e-6)
-		}()
-
-		timer := time.NewTimer(config.PageRankTimeout)
-		select {
-		case pr := <-prDone:
-			timer.Stop()
-			for id, score := range pr {
-				localPageRank[a.nodeToID[id]] = score
-			}
-		case <-timer.C:
-			// Timeout - use uniform distribution
-			uniform := 1.0 / float64(len(a.issueMap))
-			for id := range a.issueMap {
-				localPageRank[id] = uniform
-			}
-		}
-	}
-
-	// Betweenness with timeout (if enabled)
-	if config.ComputeBetweenness {
-		bwDone := make(chan BetweennessResult, 1)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Panic -> implicitly causes timeout in parent
-				}
-			}()
-			// Choose algorithm based on mode
-			if config.BetweennessMode == BetweennessApproximate && config.BetweennessSampleSize > 0 {
-				bwDone <- ApproxBetweenness(a.g, config.BetweennessSampleSize, 1)
-			} else {
-				// Exact mode or mode not set (default to exact)
-				exact := network.Betweenness(a.g)
-				bwDone <- BetweennessResult{
-					Scores:     exact,
-					Mode:       BetweennessExact,
-					TotalNodes: a.g.Nodes().Len(),
-				}
-			}
-		}()
-
-		timer := time.NewTimer(config.BetweennessTimeout)
-		select {
-		case result := <-bwDone:
-			timer.Stop()
-			for id, score := range result.Scores {
-				localBetweenness[a.nodeToID[id]] = score
-			}
-			// Track if approximation was used
-			if result.Mode == BetweennessApproximate {
-				betweennessIsApprox = true
-			}
-		case <-timer.C:
-			// Timeout - skip (leave empty)
-		}
-	}
-
-	// Eigenvector (if enabled - usually fast, no timeout needed)
-	if config.ComputeEigenvector {
-		for id, score := range computeEigenvector(a.g) {
-			localEigenvector[a.nodeToID[id]] = score
-		}
-	}
-
-	// HITS with timeout (if enabled and graph has edges)
-	if config.ComputeHITS && a.g.Edges().Len() > 0 {
-		hitsDone := make(chan map[int64]network.HubAuthority, 1)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Panic -> implicitly causes timeout in parent
-				}
-			}()
-			hitsDone <- network.HITS(a.g, 1e-3)
-		}()
-
-		timer := time.NewTimer(config.HITSTimeout)
-		select {
-		case hubAuth := <-hitsDone:
-			timer.Stop()
-			for id, ha := range hubAuth {
-				localHubs[a.nodeToID[id]] = ha.Hub
-				localAuthorities[a.nodeToID[id]] = ha.Authority
-			}
-		case <-timer.C:
-			// Timeout - skip
-		}
-	}
-
-	// Critical Path (if enabled - requires topological sort)
-	if config.ComputeCriticalPath {
-		sorted, err := topo.Sort(a.g)
-		if err == nil {
-			localCriticalPath = a.computeHeights(sorted)
-		}
-	}
-
-	// Cycles with SCC pre-check and timeout (if enabled)
-	if config.ComputeCycles {
-		maxCycles := config.MaxCyclesToStore
-		if maxCycles == 0 {
-			maxCycles = 100 // Default
-		}
-
-		sccs := topo.TarjanSCC(a.g)
-		hasCycles := false
-		for _, scc := range sccs {
-			if len(scc) > 1 {
-				hasCycles = true
-				break
-			}
-		}
-
-		if hasCycles {
-			cyclesDone := make(chan [][]graph.Node, 1)
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						// Panic -> implicitly causes timeout in parent
-					}
-				}()
-				cyclesDone <- findCyclesSafe(a.g, maxCycles)
-			}()
-
-			timer := time.NewTimer(config.CyclesTimeout)
-			select {
-			case cycles := <-cyclesDone:
-				timer.Stop()
-				cyclesToProcess := cycles
-				if len(cyclesToProcess) > maxCycles {
-					cyclesToProcess = cyclesToProcess[:maxCycles]
-					cyclesTruncated = true
-				}
-
-				for _, cycle := range cyclesToProcess {
-					var cycleIDs []string
-					for _, n := range cycle {
-						cycleIDs = append(cycleIDs, a.nodeToID[n.ID()])
-					}
-					localCycles = append(localCycles, cycleIDs)
-				}
-
-
-			case <-timer.C:
-				localCycles = [][]string{{"CYCLE_DETECTION_TIMEOUT"}}
-			}
-		}
-	}
-
-	// Advanced graph signals: k-core, articulation points (undirected), slack (bv-85)
-	localCore, localArticulation = a.computeCoreAndArticulation()
-	localSlack = a.computeSlack()
-
-	// ATOMIC ASSIGNMENT: Lock once and assign all computed values
-	stats.mu.Lock()
-	stats.pageRank = localPageRank
-	stats.betweenness = localBetweenness
-	stats.eigenvector = localEigenvector
-	stats.hubs = localHubs
-	stats.authorities = localAuthorities
-	stats.criticalPathScore = localCriticalPath
-	stats.coreNumber = localCore
-	stats.articulation = localArticulation
-	stats.slack = localSlack
-	stats.cycles = localCycles
-	stats.phase2Ready = true
-
-	cycleReason := config.CyclesSkipReason
-	if cyclesTruncated {
-		if cycleReason != "" {
-			cycleReason += "; "
-		}
-		cycleReason += "truncated"
-	}
-
-	// Set status for metrics (bv-85: include k-core, articulation, slack)
-	stats.status = MetricStatus{
-		PageRank:     statusEntry{State: stateFromTiming(config.ComputePageRank, false)},
-		Betweenness:  statusEntry{
-			State: stateFromTiming(config.ComputeBetweenness, false),
-			Reason: betweennessReason(config, betweennessIsApprox),
-		},
-		Eigenvector:  statusEntry{State: stateFromTiming(config.ComputeEigenvector, false)},
-		HITS:         statusEntry{State: stateFromTiming(config.ComputeHITS, false)},
-		Critical:     statusEntry{State: stateFromTiming(config.ComputeCriticalPath, false)},
-		Cycles:       statusEntry{State: stateFromTiming(config.ComputeCycles, false), Reason: cycleReason},
-		KCore:        statusEntry{State: "computed"},
-		Articulation: statusEntry{State: "computed"},
-		Slack:        statusEntry{State: "computed"},
-	}
-	stats.mu.Unlock()
+	// Use the profiled version logic to avoid duplication
+	// We discard the profile data as this is the standard run
+	dummyProfile := &StartupProfile{}
+	a.computePhase2WithProfile(stats, config, dummyProfile)
 }
 
 func (a *Analyzer) computeHeights(sorted []graph.Node) map[string]float64 {
@@ -1275,7 +1066,12 @@ func (a *Analyzer) computeSlack() map[string]float64 {
 	// Map for quick node lookup
 	forwardDeps := func(id string) []int64 {
 		nID := a.idToNode[id]
-		to := a.g.To(nID) // dependents (nodes that require this)
+		// In our graph, u -> v means u depends on v.
+		// g.To(nID) returns nodes that nID depends on (prerequisites/dependencies).
+		// Note: The variable naming in the loop below (distFromStart) implies calculating
+		// depth from the "start" of the dependency chain (leaf nodes), which works
+		// because we iterate the topological order (Dependent -> Prerequisite).
+		to := a.g.To(nID)
 		var res []int64
 		for to.Next() {
 			res = append(res, to.Node().ID())
