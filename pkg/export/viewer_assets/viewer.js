@@ -1393,6 +1393,9 @@ function beadsApp() {
     diagnostics: DIAGNOSTICS, // Reference to global diagnostics
     toasts: [],              // Toast notifications
     view: 'dashboard',
+    mobileMenuOpen: false,   // Mobile hamburger menu state
+    mobileSearchOpen: false, // Mobile search bar state
+    filtersExpanded: false,  // Collapsible filters on mobile
     darkMode: localStorage.getItem('darkMode') !== null
       ? localStorage.getItem('darkMode') === 'true'
       : window.matchMedia('(prefers-color-scheme: dark)').matches,

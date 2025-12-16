@@ -100,6 +100,11 @@
     .priority-2 { @apply border-l-4 border-blue-500; }
     .priority-3 { @apply border-l-4 border-gray-400; }
     .priority-4 { @apply border-l-4 border-gray-300; }
+
+    /* Filter panel: always show on md+ screens */
+    @media (min-width: 768px) {
+      .filter-content { display: block !important; }
+    }
   </style>
 </head>
 <body class="bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-screen">
@@ -131,11 +136,11 @@
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
               </svg>
             </div>
-            <h1 class="text-xl font-semibold">Beads Viewer</h1>
+            <h1 class="text-lg sm:text-xl font-semibold">Beads Viewer</h1>
           </div>
 
-          <!-- Navigation tabs -->
-          <nav class="flex space-x-1">
+          <!-- Desktop Navigation tabs (hidden on mobile) -->
+          <nav class="hidden md:flex space-x-1">
             <a href="#/"
                @click.prevent="window.location.hash = '#/'"
                :class="view === 'dashboard' ? 'bg-beads-100 text-beads-700 dark:bg-beads-900 dark:text-beads-200' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'"
@@ -163,18 +168,25 @@
           </nav>
 
           <!-- Actions -->
-          <div class="flex items-center space-x-3">
-            <!-- Search -->
-            <div class="relative">
+          <div class="flex items-center space-x-2 sm:space-x-3">
+            <!-- Search (hidden on mobile, shown as icon) -->
+            <div class="relative hidden sm:block">
               <input type="text"
                      x-model="searchQuery"
                      @input.debounce.300ms="search()"
                      placeholder="Search issues..."
-                     class="w-64 pl-10 pr-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm focus:ring-2 focus:ring-beads-500 focus:border-transparent">
+                     class="w-40 lg:w-64 pl-10 pr-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm focus:ring-2 focus:ring-beads-500 focus:border-transparent">
               <svg class="absolute left-3 top-2.5 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
               </svg>
             </div>
+
+            <!-- Mobile search button (shows on mobile) -->
+            <button @click="mobileSearchOpen = !mobileSearchOpen" class="sm:hidden p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+              </svg>
+            </button>
 
             <!-- Dark mode toggle -->
             <button @click="toggleDarkMode()" class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700">
@@ -185,9 +197,63 @@
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
               </svg>
             </button>
+
+            <!-- Mobile menu button (hamburger) -->
+            <button @click="mobileMenuOpen = !mobileMenuOpen" class="md:hidden p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700">
+              <svg x-show="!mobileMenuOpen" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+              </svg>
+              <svg x-show="mobileMenuOpen" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
           </div>
         </div>
       </div>
+
+      <!-- Mobile search bar (expandable) -->
+      <div x-show="mobileSearchOpen" x-transition class="sm:hidden px-4 pb-3">
+        <div class="relative">
+          <input type="text"
+                 x-model="searchQuery"
+                 @input.debounce.300ms="search()"
+                 placeholder="Search issues..."
+                 class="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm focus:ring-2 focus:ring-beads-500 focus:border-transparent">
+          <svg class="absolute left-3 top-2.5 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Mobile navigation menu -->
+      <nav x-show="mobileMenuOpen" x-transition class="md:hidden border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900">
+        <div class="px-4 py-3 space-y-1">
+          <a href="#/"
+             @click.prevent="window.location.hash = '#/'; mobileMenuOpen = false"
+             :class="view === 'dashboard' ? 'bg-beads-100 text-beads-700 dark:bg-beads-900 dark:text-beads-200' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'"
+             class="block px-4 py-3 rounded-lg text-base font-medium transition-colors">
+            Dashboard
+          </a>
+          <a href="#/issues"
+             @click.prevent="window.location.hash = '#/issues'; mobileMenuOpen = false"
+             :class="view === 'issues' ? 'bg-beads-100 text-beads-700 dark:bg-beads-900 dark:text-beads-200' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'"
+             class="block px-4 py-3 rounded-lg text-base font-medium transition-colors">
+            Issues
+          </a>
+          <a href="#/insights"
+             @click.prevent="window.location.hash = '#/insights'; mobileMenuOpen = false"
+             :class="view === 'insights' ? 'bg-beads-100 text-beads-700 dark:bg-beads-900 dark:text-beads-200' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'"
+             class="block px-4 py-3 rounded-lg text-base font-medium transition-colors">
+            Insights
+          </a>
+          <a href="#/graph"
+             @click.prevent="window.location.hash = '#/graph'; mobileMenuOpen = false"
+             :class="view === 'graph' ? 'bg-beads-100 text-beads-700 dark:bg-beads-900 dark:text-beads-200' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'"
+             class="block px-4 py-3 rounded-lg text-base font-medium transition-colors">
+            Graph
+          </a>
+        </div>
+      </nav>
     </header>
 
     <!-- Loading state -->
@@ -450,9 +516,19 @@
       <div x-show="view === 'issues'">
         <!-- Filters Panel -->
         <div class="mb-6 bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4">
-          <!-- Filter header with clear button -->
-          <div class="flex items-center justify-between mb-4">
-            <div class="flex items-center space-x-2">
+          <!-- Filter header with toggle for mobile -->
+          <div class="flex items-center justify-between md:mb-4"
+               :class="{ 'mb-4': filtersExpanded }">
+            <button @click="filtersExpanded = !filtersExpanded" class="md:hidden flex items-center space-x-2">
+              <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-90': filtersExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+              </svg>
+              <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Filters</h3>
+              <span x-show="hasActiveFilters" class="px-2 py-0.5 bg-beads-100 dark:bg-beads-900 text-beads-700 dark:text-beads-200 text-xs rounded-full">
+                Active
+              </span>
+            </button>
+            <div class="hidden md:flex items-center space-x-2">
               <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Filters</h3>
               <span x-show="hasActiveFilters" class="px-2 py-0.5 bg-beads-100 dark:bg-beads-900 text-beads-700 dark:text-beads-200 text-xs rounded-full">
                 Active
@@ -464,8 +540,8 @@
             </button>
           </div>
 
-          <!-- Filter rows -->
-          <div class="space-y-4">
+          <!-- Filter rows (collapsible on mobile, always shown on desktop) -->
+          <div class="space-y-4 mt-4 filter-content" x-show="filtersExpanded" x-transition>
             <!-- Status filter (multi-select chips) -->
             <div>
               <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Status</label>
@@ -997,8 +1073,8 @@
                     <a :href="'#/issue/' + encodeURIComponent(selectedIssue.id)"
                        class="text-sm font-mono text-beads-600 dark:text-beads-400 hover:underline"
                        x-text="selectedIssue.id"></a>
-                    <span class="text-xs text-gray-400 dark:text-gray-500">|</span>
-                    <span class="text-xs text-gray-500 dark:text-gray-400">Press <kbd class="px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-xs">j</kbd>/<kbd class="px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-xs">k</kbd> for prev/next, <kbd class="px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-xs">g</kbd> for graph</span>
+                    <span class="hidden sm:inline text-xs text-gray-400 dark:text-gray-500">|</span>
+                    <span class="hidden sm:inline text-xs text-gray-500 dark:text-gray-400">Press <kbd class="px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-xs">j</kbd>/<kbd class="px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-xs">k</kbd> for prev/next, <kbd class="px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-xs">g</kbd> for graph</span>
                   </div>
                   <h2 class="text-xl font-semibold mt-1" x-text="selectedIssue.title"></h2>
                 </div>
