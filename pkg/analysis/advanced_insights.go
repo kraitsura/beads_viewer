@@ -454,6 +454,9 @@ func (a *Analyzer) computeMarginalUnblocks(issueID string, alreadyCompleted map[
 		hasThisBlocker := false
 
 		for _, dep := range issue.Dependencies {
+			if dep == nil {
+				continue
+			}
 			if dep.Type != model.DepBlocks {
 				continue
 			}
