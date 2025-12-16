@@ -153,12 +153,13 @@ type Model struct {
 	watcher   *watcher.Watcher // File watcher for live reload
 
 	// UI Components
-	list           list.Model
-	viewport       viewport.Model
-	renderer       *glamour.TermRenderer
+	list               list.Model
+	viewport           viewport.Model
+	renderer           *glamour.TermRenderer
 	board              BoardModel
 	labelDashboard     LabelDashboardModel
 	velocityComparison VelocityComparisonModel // bv-125
+	shortcutsSidebar   ShortcutsSidebar        // bv-3qi5
 	graphView          GraphModel
 	insightsPanel      InsightsModel
 	theme              Theme
@@ -169,35 +170,36 @@ type Model struct {
 	updateURL       string
 
 	// Focus and View State
-	focused               focus
-	isSplitView           bool
-	isBoardView           bool
-	isGraphView           bool
-	isActionableView      bool
-	isHistoryView         bool
-	showDetails           bool
-	showHelp              bool
-	helpScroll            int // Scroll offset for help overlay
-	showQuitConfirm       bool
-	ready                 bool
-	width                 int
-	height                int
-	showLabelHealthDetail bool
-	showLabelDrilldown    bool
-	labelHealthDetail     *analysis.LabelHealth
-	labelHealthDetailFlow labelFlowSummary
-	labelDrilldownLabel   string
-	labelDrilldownIssues  []model.Issue
-	labelDrilldownCache       map[string][]model.Issue
-	showLabelGraphAnalysis    bool
-	labelGraphAnalysisResult  *LabelGraphAnalysisResult
-	showAttentionView      bool
-	showVelocityComparison bool // bv-125
-	labelHealthCached      bool
-	labelHealthCache      analysis.LabelAnalysisResult
-	attentionCached       bool
-	attentionCache        analysis.LabelAttentionResult
-	flowMatrixText        string
+	focused                  focus
+	isSplitView              bool
+	isBoardView              bool
+	isGraphView              bool
+	isActionableView         bool
+	isHistoryView            bool
+	showDetails              bool
+	showHelp                 bool
+	helpScroll               int // Scroll offset for help overlay
+	showQuitConfirm          bool
+	ready                    bool
+	width                    int
+	height                   int
+	showLabelHealthDetail    bool
+	showLabelDrilldown       bool
+	labelHealthDetail        *analysis.LabelHealth
+	labelHealthDetailFlow    labelFlowSummary
+	labelDrilldownLabel      string
+	labelDrilldownIssues     []model.Issue
+	labelDrilldownCache      map[string][]model.Issue
+	showLabelGraphAnalysis   bool
+	labelGraphAnalysisResult *LabelGraphAnalysisResult
+	showAttentionView        bool
+	showVelocityComparison   bool // bv-125
+	showShortcutsSidebar     bool // bv-3qi5 toggleable shortcuts sidebar
+	labelHealthCached        bool
+	labelHealthCache         analysis.LabelAnalysisResult
+	attentionCached          bool
+	attentionCache           analysis.LabelAttentionResult
+	flowMatrixText           string
 
 	// Actionable view
 	actionableView ActionableModel
@@ -208,8 +210,11 @@ type Model struct {
 	historyLoadFailed bool // True if history loading failed
 
 	// Filter state
-	currentFilter string
-	searchTerm    string
+	currentFilter         string
+	searchTerm            string
+	semanticSearchEnabled bool
+	semanticIndexBuilding bool
+	semanticSearch        *SemanticSearch
 
 	// Stats (cached)
 	countOpen    int
@@ -364,6 +369,19 @@ type WorkspaceInfo struct {
 	RepoPrefixes []string
 }
 
+func (m *Model) updateSemanticIDs(items []list.Item) {
+	if m.semanticSearch == nil {
+		return
+	}
+	ids := make([]string, 0, len(items))
+	for _, it := range items {
+		if issueItem, ok := it.(IssueItem); ok {
+			ids = append(ids, issueItem.Issue.ID)
+		}
+	}
+	m.semanticSearch.SetIDs(ids)
+}
+
 // NewModel creates a new Model from the given issues
 // beadsPath is the path to the beads.jsonl file for live reload support
 func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe, beadsPath string) Model {
@@ -495,7 +513,8 @@ func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe, beadsPath strin
 	board := NewBoardModel(issues, theme)
 	labelDashboard := NewLabelDashboardModel(theme)
 	velocityComparison := NewVelocityComparisonModel(theme) // bv-125
-	ins := graphStats.GenerateInsights(len(issues))         // allow UI to show as many as fit
+	shortcutsSidebar := NewShortcutsSidebar(theme)         // bv-3qi5
+	ins := graphStats.GenerateInsights(len(issues))        // allow UI to show as many as fit
 	insightsPanel := NewInsightsModel(ins, issueMap, theme)
 	graphView := NewGraphModel(issues, &ins, theme)
 
@@ -578,6 +597,16 @@ func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe, beadsPath strin
 		}
 	}
 
+	// Semantic search (bv-9gf.3): initialized lazily on first toggle.
+	semanticSearch := NewSemanticSearch()
+	semanticIDs := make([]string, 0, len(items))
+	for _, it := range items {
+		if issueItem, ok := it.(IssueItem); ok {
+			semanticIDs = append(semanticIDs, issueItem.Issue.ID)
+		}
+	}
+	semanticSearch.SetIDs(semanticIDs)
+
 	// Build initial status message if watcher failed
 	var initialStatus string
 	var initialStatusErr bool
@@ -610,10 +639,12 @@ func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe, beadsPath strin
 		board:               board,
 		labelDashboard:      labelDashboard,
 		velocityComparison:  velocityComparison,
+		shortcutsSidebar:    shortcutsSidebar,
 		graphView:           graphView,
 		insightsPanel:       insightsPanel,
 		theme:               theme,
 		currentFilter:       "all",
+		semanticSearch:      semanticSearch,
 		focused:             focusList,
 		countOpen:           cOpen,
 		countReady:          cReady,
@@ -667,6 +698,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateAvailable = true
 		m.updateTag = msg.TagName
 		m.updateURL = msg.URL
+
+	case SemanticIndexReadyMsg:
+		m.semanticIndexBuilding = false
+		if msg.Error != nil {
+			// If indexing fails, revert to fuzzy mode for predictable behavior.
+			m.semanticSearchEnabled = false
+			m.list.Filter = list.DefaultFilter
+			m.statusMsg = fmt.Sprintf("Semantic search unavailable: %v", msg.Error)
+			m.statusIsError = true
+			break
+		}
+		if m.semanticSearch != nil {
+			m.semanticSearch.SetIndex(msg.Index, msg.Embedder)
+		}
+		if !msg.Loaded {
+			m.statusMsg = fmt.Sprintf("Semantic index built (%d embedded)", msg.Stats.Embedded)
+		} else if msg.Stats.Changed() {
+			m.statusMsg = fmt.Sprintf("Semantic index updated (+%d ~%d -%d)", msg.Stats.Added, msg.Stats.Updated, msg.Stats.Removed)
+		} else {
+			m.statusMsg = "Semantic index up to date"
+		}
+		m.statusIsError = false
+
+		// Refresh current filter view if the user is actively searching.
+		if m.semanticSearchEnabled && m.list.FilterState() != list.Unfiltered {
+			prevState := m.list.FilterState()
+			filterText := m.list.FilterInput.Value()
+			m.list.SetFilterText(filterText)
+			if prevState == list.Filtering {
+				m.list.SetFilterState(list.Filtering)
+			}
+		}
 
 	case Phase2ReadyMsg:
 		// Ignore stale Phase2 completions (from before a file reload)
@@ -874,6 +937,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.list.SetItems(items)
+		m.updateSemanticIDs(items)
 
 		// Restore selection position
 		if selectedID != "" {
@@ -901,6 +965,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-apply recipe filter if active
 		if m.activeRecipe != nil {
 			m.applyRecipe(m.activeRecipe)
+		}
+
+		// Keep semantic index current when enabled.
+		if m.semanticSearchEnabled && !m.semanticIndexBuilding {
+			m.semanticIndexBuilding = true
+			cmds = append(cmds, BuildSemanticIndexCmd(m.issues))
 		}
 
 		if cacheHit {
@@ -1128,6 +1198,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.focused = focusList
 			}
 			return m, nil
+		}
+
+		// Handle shortcuts sidebar toggle (F2) - bv-3qi5
+		if msg.String() == "f2" && m.list.FilterState() != list.Filtering {
+			m.showShortcutsSidebar = !m.showShortcutsSidebar
+			if m.showShortcutsSidebar {
+				m.shortcutsSidebar.ResetScroll()
+				m.statusMsg = "Shortcuts sidebar: F2 hide | ctrl+j/k scroll"
+				m.statusIsError = false
+			} else {
+				m.statusMsg = ""
+			}
+			return m, nil
+		}
+
+		// Handle shortcuts sidebar scrolling (Ctrl+j/k when sidebar visible) - bv-3qi5
+		if m.showShortcutsSidebar && m.list.FilterState() != list.Filtering {
+			switch msg.String() {
+			case "ctrl+j":
+				m.shortcutsSidebar.ScrollDown()
+				return m, nil
+			case "ctrl+k":
+				m.shortcutsSidebar.ScrollUp()
+				return m, nil
+			}
+		}
+
+		// Semantic search toggle (bv-9gf.3)
+		if msg.String() == "ctrl+s" && m.focused == focusList {
+			m.statusIsError = false
+			m.semanticSearchEnabled = !m.semanticSearchEnabled
+			if m.semanticSearchEnabled {
+				if m.semanticSearch != nil {
+					m.list.Filter = m.semanticSearch.Filter
+					if !m.semanticSearch.Snapshot().Ready && !m.semanticIndexBuilding {
+						m.semanticIndexBuilding = true
+						m.statusMsg = "Semantic search: building index…"
+						cmds = append(cmds, BuildSemanticIndexCmd(m.issues))
+					} else if !m.semanticSearch.Snapshot().Ready && m.semanticIndexBuilding {
+						m.statusMsg = "Semantic search: indexing…"
+					} else {
+						m.statusMsg = "Semantic search enabled"
+					}
+				} else {
+					m.semanticSearchEnabled = false
+					m.list.Filter = list.DefaultFilter
+					m.statusMsg = "Semantic search unavailable"
+					m.statusIsError = true
+				}
+			} else {
+				m.list.Filter = list.DefaultFilter
+				m.statusMsg = "Fuzzy search enabled"
+			}
+
+			// Refresh the current list filter results immediately.
+			prevState := m.list.FilterState()
+			filterText := m.list.FilterInput.Value()
+			if prevState != list.Unfiltered {
+				m.list.SetFilterText(filterText)
+				if prevState == list.Filtering {
+					m.list.SetFilterState(list.Filtering)
+				}
+			}
+
+			return m, tea.Batch(cmds...)
 		}
 
 		// If help is showing, handle navigation keys for scrolling
@@ -2173,6 +2308,15 @@ func (m Model) View() string {
 		}
 	}
 
+	// Add shortcuts sidebar if enabled (bv-3qi5)
+	if m.showShortcutsSidebar {
+		// Update sidebar context based on current focus
+		m.shortcutsSidebar.SetContext(ContextFromFocus(m.focused))
+		m.shortcutsSidebar.SetSize(m.shortcutsSidebar.Width(), m.height-2)
+		sidebar := m.shortcutsSidebar.View()
+		body = lipgloss.JoinHorizontal(lipgloss.Top, body, sidebar)
+	}
+
 	footer := m.renderFooter()
 
 	// Ensure the final output fits exactly in the terminal height
@@ -2500,6 +2644,7 @@ func (m *Model) renderHelpOverlay() string {
 		{"r", "Show Ready (unblocked)"},
 		{"a", "Show All issues"},
 		{"/", "Fuzzy search"},
+		{"Ctrl+S", "Toggle semantic search mode"},
 	}
 	for _, s := range filters {
 		sb.WriteString(keyStyle.Render(s.key) + descStyle.Render(s.desc) + "\n")
@@ -3301,7 +3446,14 @@ func (m *Model) renderFooter() string {
 	} else if m.isHistoryView {
 		keyHints = append(keyHints, keyStyle.Render("j/k")+" nav", keyStyle.Render("tab")+" focus", keyStyle.Render("⏎")+" jump", keyStyle.Render("H")+" close")
 	} else if m.list.FilterState() == list.Filtering {
-		keyHints = append(keyHints, keyStyle.Render("esc")+" cancel", keyStyle.Render("⏎")+" select")
+		mode := "fuzzy"
+		if m.semanticSearchEnabled {
+			mode = "semantic"
+			if m.semanticIndexBuilding {
+				mode = "semantic (indexing)"
+			}
+		}
+		keyHints = append(keyHints, keyStyle.Render("esc")+" cancel", keyStyle.Render("ctrl+s")+" "+mode, keyStyle.Render("⏎")+" select")
 	} else if m.showTimeTravelPrompt {
 		keyHints = append(keyHints, keyStyle.Render("⏎")+" compare", keyStyle.Render("esc")+" cancel")
 	} else {
@@ -3464,6 +3616,7 @@ func (m *Model) applyFilter() {
 	}
 
 	m.list.SetItems(filteredItems)
+	m.updateSemanticIDs(filteredItems)
 	m.board.SetIssues(filteredIssues)
 	// Generate insights for graph view (for metric rankings and sorting)
 	filterIns := m.analysis.GenerateInsights(len(filteredIssues))
@@ -3629,6 +3782,7 @@ func (m *Model) applyRecipe(r *recipe.Recipe) {
 	}
 
 	m.list.SetItems(filteredItems)
+	m.updateSemanticIDs(filteredItems)
 	m.board.SetIssues(filteredIssues)
 	// Generate insights for graph view (for metric rankings and sorting)
 	recipeIns := m.analysis.GenerateInsights(len(filteredIssues))

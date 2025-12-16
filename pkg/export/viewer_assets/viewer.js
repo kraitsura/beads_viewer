@@ -654,6 +654,9 @@ async function initGraphEngine() {
     const wasmModule = await import('./vendor/bv_graph.js');
     await wasmModule.default(); // Initialize WASM
 
+    // Expose for other modules (e.g., graph.js force-graph view) to reuse.
+    window.bvGraphWasm = wasmModule;
+
     GRAPH_STATE.wasm = wasmModule;
     GRAPH_STATE.graph = new wasmModule.DiGraph();
     GRAPH_STATE.nodeMap = new Map();
@@ -1002,6 +1005,46 @@ function getUniqueLabels() {
 function getIssue(id) {
   const results = execQuery(`SELECT * FROM issue_overview_mv WHERE id = ?`, [id]);
   return results[0] || null;
+}
+
+// ============================================================================
+// Force-Graph View Data (Interactive Graph Visualization)
+// ============================================================================
+
+function parseLabelsJSON(labelsStr) {
+  if (!labelsStr) return [];
+  try {
+    const parsed = JSON.parse(labelsStr);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function getGraphViewData() {
+  const issues = execQuery(`
+    SELECT id, title, description, status, priority, issue_type, assignee, labels, created_at, updated_at
+    FROM issues
+  `).map(row => ({
+    id: row.id,
+    title: row.title || '',
+    description: row.description || '',
+    status: row.status || 'open',
+    priority: row.priority ?? 2,
+    type: row.issue_type || 'task',
+    assignee: row.assignee || '',
+    labels: parseLabelsJSON(row.labels),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }));
+
+  const dependencies = execQuery(`
+    SELECT issue_id, depends_on_id, type
+    FROM dependencies
+    WHERE type = 'blocks'
+  `);
+
+  return { issues, dependencies };
 }
 
 /**
@@ -1719,6 +1762,12 @@ function beadsApp() {
     whatIfResult: null,
     topKSet: null,
 
+    // Force-graph view (interactive dependency visualization)
+    forceGraphReady: false,
+    forceGraphLoading: false,
+    forceGraphError: null,
+    forceGraphModule: null,
+
     // Critical path highlighting
     showCriticalPath: false,
     criticalPathData: null, // { path: [issueIds], length: number, animating: boolean }
@@ -1822,6 +1871,14 @@ function beadsApp() {
         }
       });
 
+      // Force-graph integration: clicking a node opens the issue modal without changing routes.
+      document.addEventListener('bv-graph:nodeClick', (e) => {
+        const nodeId = e?.detail?.node?.id;
+        if (nodeId) {
+          this.selectIssue(nodeId);
+        }
+      });
+
       try {
         this.loadingMessage = 'Loading sql.js WebAssembly...';
         await loadDatabase((msg) => {
@@ -1884,6 +1941,16 @@ function beadsApp() {
         // Record load time
         DIAGNOSTICS.loadTimeMs = Date.now() - DIAGNOSTICS.startTime;
 
+        // Initialize charts dashboard (bv-wb6h)
+        if (typeof window.bvCharts !== 'undefined') {
+          try {
+            const graphData = getGraphViewData();
+            window.bvCharts.init(graphData.issues, graphData.dependencies);
+          } catch (e) {
+            console.warn('[Charts] Init failed:', e);
+          }
+        }
+
         this.loading = false;
       } catch (err) {
         console.error('Init failed:', err);
@@ -1943,11 +2010,69 @@ function beadsApp() {
         case 'graph':
           this.view = 'graph';
           this.selectedIssue = null;
+          this.$nextTick(() => {
+            this.initForceGraphView();
+          });
           break;
 
         default:
           this.view = 'dashboard';
           this.selectedIssue = null;
+      }
+    },
+
+    /**
+     * Initialize (or refresh) the interactive force-graph view.
+     * This is invoked when navigating to #/graph.
+     */
+    async initForceGraphView() {
+      if (this.forceGraphLoading) return;
+
+      this.forceGraphLoading = true;
+      this.forceGraphError = null;
+
+      try {
+        if (typeof window.ForceGraph !== 'function' || typeof window.d3 === 'undefined') {
+          throw new Error('force-graph dependencies not loaded');
+        }
+
+        // Best-effort: ensure the graph WASM module is available for graph.js.
+        if (typeof window.bvGraphWasm === 'undefined') {
+          this.graphReady = await initGraphEngine();
+          DIAGNOSTICS.graphWasm = this.graphReady;
+        }
+
+        if (!this.forceGraphModule) {
+          this.forceGraphModule = await import('./graph.js');
+        }
+
+        if (!this.forceGraphReady) {
+          await this.forceGraphModule.initGraph('graph-container');
+          this.forceGraphReady = true;
+        }
+
+        const { issues, dependencies } = getGraphViewData();
+        this.forceGraphModule.loadData(issues, dependencies);
+
+        // Match canvas size to container for crisp rendering.
+        const container = document.getElementById('graph-container');
+        const graph = this.forceGraphModule.getGraph?.();
+        if (container && graph && typeof graph.width === 'function' && typeof graph.height === 'function') {
+          graph.width(container.clientWidth);
+          graph.height(container.clientHeight);
+        }
+      } catch (err) {
+        console.error('[ForceGraph] init failed:', err);
+        this.forceGraphError = err?.message || String(err);
+        this.forceGraphReady = false;
+        showToast(`Graph view failed: ${this.forceGraphError}`, 'error');
+
+        const container = document.getElementById('graph-container');
+        if (container) {
+          container.innerHTML = '<p class="text-gray-500 dark:text-gray-400 text-center py-8">Graph failed to load.</p>';
+        }
+      } finally {
+        this.forceGraphLoading = false;
       }
     },
 
@@ -2061,6 +2186,27 @@ function beadsApp() {
     },
 
     /**
+     * Select an issue and open the modal without changing routes.
+     * Used by keyboard shortcuts and the force-graph view.
+     */
+    selectIssue(id) {
+      if (!id) return;
+      const issue = getIssue(id);
+      if (!issue) {
+        showToast(`Issue not found: ${id}`, 'warning');
+        return;
+      }
+
+      this.showDepGraph = false;
+      this.whatIfResult = null;
+      this.selectedIssue = issue;
+
+      if (this.issues.length) {
+        this.issueNavList = this.issues.map(i => i.id);
+      }
+    },
+
+    /**
      * Show issue detail (navigates to issue route)
      */
     showIssue(id) {
@@ -2110,10 +2256,15 @@ function beadsApp() {
       const newIndex = (currentIndex + direction + this.issueNavList.length) % this.issueNavList.length;
       const newId = this.issueNavList[newIndex];
 
-      // Reset state and navigate
+      // Reset state and navigate/select
       this.showDepGraph = false;
       this.whatIfResult = null;
-      navigateToIssue(newId);
+      const route = parseRoute(window.location.hash);
+      if (route.view === 'issue') {
+        navigateToIssue(newId);
+      } else {
+        this.selectIssue(newId);
+      }
     },
 
     /**
