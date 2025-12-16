@@ -796,9 +796,7 @@ func (a *Analyzer) computeWhatIfDelta(issueID string) *WhatIfDelta {
 	directCount := len(directUnblocks)
 
 	// Compute transitive unblocks (cascade effect)
-	visited := make(map[string]bool)
-	visited[issueID] = true
-	transitiveCount := a.countTransitiveUnblocks(issueID, visited)
+	transitiveCount := a.countTransitiveUnblocks(issueID)
 
 	// Compute blocked reduction (how many items in blocked status would become unblocked)
 	blockedReduction := 0
@@ -849,15 +847,66 @@ func (a *Analyzer) computeWhatIfDelta(issueID string) *WhatIfDelta {
 	}
 }
 
-// countTransitiveUnblocks recursively counts issues unblocked downstream
-func (a *Analyzer) countTransitiveUnblocks(issueID string, visited map[string]bool) int {
-	directUnblocks := a.computeUnblocks(issueID)
-	count := len(directUnblocks)
+// countTransitiveUnblocks counts total issues unblocked by a hypothetical completion of issueID,
+// including cascading effects (diamonds, chains) via simulation.
+func (a *Analyzer) countTransitiveUnblocks(issueID string) int {
+	// Set of "conceptually closed" issues: initially just the starting issue
+	simulatedClosed := make(map[string]bool)
+	simulatedClosed[issueID] = true
 
-	for _, unblockID := range directUnblocks {
-		if !visited[unblockID] {
-			visited[unblockID] = true
-			count += a.countTransitiveUnblocks(unblockID, visited)
+	queue := []string{issueID}
+	count := 0
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+
+		// Find dependents of the current node
+		nodeID, ok := a.idToNode[curr]
+		if !ok {
+			continue
+		}
+
+		dependents := a.g.To(nodeID)
+		for dependents.Next() {
+			depNode := dependents.Node()
+			depID := a.nodeToID[depNode.ID()]
+
+			// If already processed in simulation or really closed, skip
+			if simulatedClosed[depID] {
+				continue
+			}
+			if issue, exists := a.issueMap[depID]; exists && issue.Status == model.StatusClosed {
+				continue
+			}
+
+			// Check if depID is now unblocked
+			// It is unblocked if ALL its blockers are (Real Closed OR Simulated Closed)
+			isBlocked := false
+			blockers := a.g.From(depNode.ID())
+			for blockers.Next() {
+				blockerNode := blockers.Node()
+				blockerID := a.nodeToID[blockerNode.ID()]
+
+				// Check blocker status
+				isClosed := false
+				if simulatedClosed[blockerID] {
+					isClosed = true
+				} else if bIssue, ok := a.issueMap[blockerID]; ok && bIssue.Status == model.StatusClosed {
+					isClosed = true
+				}
+
+				if !isClosed {
+					isBlocked = true
+					break
+				}
+			}
+
+			if !isBlocked {
+				simulatedClosed[depID] = true
+				queue = append(queue, depID)
+				count++
+			}
 		}
 	}
 

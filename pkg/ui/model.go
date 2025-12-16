@@ -417,7 +417,7 @@ func NewModel(issues []model.Issue, activeRecipe *recipe.Recipe, beadsPath strin
 		// Check if blocked by open dependencies
 		isBlocked := false
 		for _, dep := range issue.Dependencies {
-			if dep.Type != model.DepBlocks {
+			if !dep.Type.IsBlocking() {
 				continue
 			}
 			if blocker, exists := issueMap[dep.DependsOnID]; exists && blocker.Status != model.StatusClosed {
@@ -685,21 +685,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Re-apply recipe filter if active (to update scores while preserving filter)
-		// Otherwise, update list with all issues
+		// Otherwise, update list respecting current filter (open/ready/etc.)
 		if m.activeRecipe != nil {
 			m.applyRecipe(m.activeRecipe)
 		} else {
-			// Update list items with new scores (PageRank, Impact now available)
-			items := make([]list.Item, len(m.issues))
-			for i := range m.issues {
-				items[i] = IssueItem{
-					Issue:      m.issues[i],
-					GraphScore: m.analysis.GetPageRankScore(m.issues[i].ID),
-					Impact:     m.analysis.GetCriticalPathScore(m.issues[i].ID),
-					RepoPrefix: ExtractRepoPrefix(m.issues[i].ID),
-				}
-			}
-			m.list.SetItems(items)
+			m.applyFilter()
 		}
 
 	case HistoryLoadedMsg:
@@ -808,7 +798,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			isBlocked := false
 			for _, dep := range issue.Dependencies {
-				if dep.Type != model.DepBlocks {
+				if !dep.Type.IsBlocking() {
 					continue
 				}
 				if blocker, exists := m.issueMap[dep.DependsOnID]; exists && blocker.Status != model.StatusClosed {
@@ -2153,7 +2143,7 @@ func (m Model) renderSplitView() string {
 		}
 	}
 
-	pageInfo := fmt.Sprintf("Page %d/%d (%d-%d of %d)", currentPage, totalPages, startItem, endItem, totalItems)
+	pageInfo := fmt.Sprintf("Page %d/%d (%d-%d of %d) ", currentPage, totalPages, startItem, endItem, totalItems)
 	pageStyle := t.Renderer.NewStyle().
 		Foreground(t.Secondary).
 		Width(listInnerWidth).
@@ -3031,6 +3021,16 @@ func (m *Model) applyFilter() {
 					}
 				}
 				include = !isBlocked
+			}
+		default:
+			if strings.HasPrefix(m.currentFilter, "label:") {
+				label := strings.TrimPrefix(m.currentFilter, "label:")
+				for _, l := range issue.Labels {
+					if l == label {
+						include = true
+						break
+					}
+				}
 			}
 		}
 
@@ -4042,13 +4042,13 @@ func (m Model) renderAlertsPanel() string {
 			switch a.Severity {
 			case drift.SeverityCritical:
 				severityStyle = t.Renderer.NewStyle().Foreground(t.Blocked).Bold(true)
-				severityIcon = "🔴"
+				severityIcon = "⚠"
 			case drift.SeverityWarning:
 				severityStyle = t.Renderer.NewStyle().Foreground(t.Feature)
-				severityIcon = "🟡"
+				severityIcon = "⚡"
 			default:
 				severityStyle = t.Renderer.NewStyle().Foreground(t.Secondary)
-				severityIcon = "🔵"
+				severityIcon = "ℹ"
 			}
 
 			// Cursor indicator

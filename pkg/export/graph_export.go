@@ -3,6 +3,7 @@ package export
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strings"
 
@@ -364,15 +365,38 @@ func generateMermaid(issues []model.Issue, issueIDs map[string]bool) string {
 		return sortedIssues[i].ID < sortedIssues[j].ID
 	})
 
-	// Build safe ID map
+	// Build deterministic, collision-free Mermaid IDs
 	safeIDMap := make(map[string]string)
+	usedSafe := make(map[string]bool)
+
+	getSafeID := func(orig string) string {
+		if safe, ok := safeIDMap[orig]; ok {
+			return safe
+		}
+		base := sanitizeMermaidID(orig)
+		if base == "" {
+			base = "node"
+		}
+		safe := base
+		if usedSafe[safe] && safeIDMap[orig] == "" {
+			// Collision: derive stable hash-based suffix
+			h := fnv.New32a()
+			_, _ = h.Write([]byte(orig))
+			safe = fmt.Sprintf("%s_%x", base, h.Sum32())
+		}
+		usedSafe[safe] = true
+		safeIDMap[orig] = safe
+		return safe
+	}
+
+	// Pre-calculate all safe IDs to ensure consistency
 	for _, i := range sortedIssues {
-		safeIDMap[i.ID] = sanitizeMermaidID(i.ID)
+		getSafeID(i.ID)
 	}
 
 	// Nodes
 	for _, i := range sortedIssues {
-		safeID := safeIDMap[i.ID]
+		safeID := getSafeID(i.ID)
 		safeTitle := sanitizeMermaidText(i.Title)
 		safeLabelID := sanitizeMermaidText(i.ID)
 
@@ -415,8 +439,8 @@ func generateMermaid(issues []model.Issue, issueIDs map[string]bool) string {
 				continue
 			}
 
-			safeFromID := safeIDMap[i.ID]
-			safeToID := safeIDMap[dep.DependsOnID]
+			safeFromID := getSafeID(i.ID)
+			safeToID := getSafeID(dep.DependsOnID)
 
 			linkStyle := "-.->" // Dashed for related
 			if dep.Type == model.DepBlocks {

@@ -158,6 +158,9 @@ func (g *GraphModel) computeRankings() {
 			sorted = append(sorted, kv{k, v})
 		}
 		sort.Slice(sorted, func(i, j int) bool {
+			if sorted[i].v == sorted[j].v {
+				return sorted[i].k < sorted[j].k
+			}
 			return sorted[i].v > sorted[j].v // Descending
 		})
 		for i, item := range sorted {
@@ -178,6 +181,9 @@ func (g *GraphModel) computeRankings() {
 			sorted = append(sorted, kv{k, v})
 		}
 		sort.Slice(sorted, func(i, j int) bool {
+			if sorted[i].v == sorted[j].v {
+				return sorted[i].k < sorted[j].k
+			}
 			return sorted[i].v > sorted[j].v
 		})
 		for i, item := range sorted {

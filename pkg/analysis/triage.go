@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -569,17 +570,30 @@ func buildQuickWins(scores []ImpactScore, unblocksMap map[string][]string, limit
 	var candidates []candidate
 	for _, score := range scores {
 		unblocks := unblocksMap[score.IssueID]
-		// Quick win score: benefits unblocking, penalizes complexity
-		// - High unblock count = good (helps project progress)
-		// - Low BlockerRatioNorm = few things depend on this = safer to work on
-		// - High priority number (P3, P4) = likely simpler tasks
-		qwScore := float64(len(unblocks)) * 0.5
-		if score.Breakdown.BlockerRatioNorm < 0.3 {
-			qwScore += 0.3 // Bonus: not a critical bottleneck (fewer downstream deps)
+		// Quick win score formula: Balance Impact vs Effort
+		// 1. Unblocks Impact: Logarithmic scale to prevent domination by huge fan-outs
+		//    log2(1)=0, log2(2)=1, log2(5)≈2.3, log2(10)≈3.3
+		unblockImpact := math.Log2(float64(len(unblocks)) + 1)
+
+		// 2. Simplicity Bonus (inverse complexity)
+		//    If not a bottleneck (low BlockerRatio), it's simpler.
+		simplicity := 0.0
+		if score.Breakdown.BlockerRatioNorm < 0.2 {
+			simplicity += 1.0
+		} else if score.Breakdown.BlockerRatioNorm < 0.4 {
+			simplicity += 0.5
 		}
-		if score.Priority >= 3 {
-			qwScore += 0.2 // Bonus: lower priority often means simpler
+
+		// 3. Priority Bonus (P0/P1 are more urgent "wins")
+		priorityBonus := 0.0
+		if score.Priority <= 1 {
+			priorityBonus = 0.5
 		}
+
+		// Combined Score
+		// Impact * 0.4 + Simplicity * 0.4 + Priority * 0.2
+		qwScore := (unblockImpact * 0.4) + (simplicity * 0.4) + (priorityBonus * 0.2)
+
 		candidates = append(candidates, candidate{score, unblocks, qwScore})
 	}
 
@@ -594,6 +608,9 @@ func buildQuickWins(scores []ImpactScore, unblocksMap map[string][]string, limit
 		reason := "Low complexity"
 		if len(c.unblocks) > 0 {
 			reason = fmt.Sprintf("Unblocks %d items", len(c.unblocks))
+		}
+		if c.score.Priority <= 1 {
+			reason += ", high priority"
 		}
 
 		quickWins = append(quickWins, QuickWin{

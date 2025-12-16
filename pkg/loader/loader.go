@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,8 +133,14 @@ func LoadIssuesFromFile(path string) ([]model.Issue, error) {
 	}
 	defer file.Close()
 
+	return ParseIssues(file)
+}
+
+// ParseIssues parses JSONL content from a reader into issues.
+// Handles UTF-8 BOM stripping, large lines, and validation.
+func ParseIssues(r io.Reader) ([]model.Issue, error) {
 	var issues []model.Issue
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(r)
 	// Increase buffer size for large lines (issues can be large)
 	const maxCapacity = 1024 * 1024 * 10 // 10MB
 	// Start with 64KB buffer, grow up to maxCapacity
@@ -171,7 +178,7 @@ func LoadIssuesFromFile(path string) ([]model.Issue, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading issues file: %w", err)
+		return nil, fmt.Errorf("error reading issues stream: %w", err)
 	}
 
 	return issues, nil

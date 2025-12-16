@@ -8,6 +8,8 @@ import (
 	"gonum.org/v1/gonum/graph"
 	"gonum.org/v1/gonum/graph/network"
 	"gonum.org/v1/gonum/graph/simple"
+	"sync"
+	"runtime"
 )
 
 // BetweennessMode specifies how betweenness centrality should be computed.
@@ -95,11 +97,34 @@ func ApproxBetweenness(g *simple.DirectedGraph, sampleSize int, seed int64) Betw
 	// Sample k random pivot nodes
 	pivots := sampleNodes(nodes, sampleSize, seed)
 
-	// Compute partial betweenness from sampled pivots only
+	// Compute partial betweenness from sampled pivots in parallel
 	partialBC := make(map[int64]float64)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// Limit concurrency to avoid excessive goroutines
+	sem := make(chan struct{}, runtime.NumCPU())
+
 	for _, pivot := range pivots {
-		singleSourceBetweenness(g, pivot, partialBC)
+		wg.Add(1)
+		go func(p graph.Node) {
+			defer wg.Done()
+			sem <- struct{}{} // Acquire token
+			defer func() { <-sem }()
+
+			// Compute local contribution
+			localBC := make(map[int64]float64)
+			singleSourceBetweenness(g, p, localBC)
+
+			// Merge into global result
+			mu.Lock()
+			for id, val := range localBC {
+				partialBC[id] += val
+			}
+			mu.Unlock()
+		}(pivot)
 	}
+	wg.Wait()
 
 	// Scale up: BC_approx = BC_partial * (n / k)
 	// This extrapolates from the sample to the full graph

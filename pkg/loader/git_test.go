@@ -1,13 +1,21 @@
 package loader
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
 )
+
+// parseJSONL is a small test helper to parse issues from JSONL data.
+func parseJSONL(data []byte) ([]model.Issue, error) {
+	return ParseIssues(bytes.NewReader(data))
+}
 
 // setupTestGitRepo creates a temporary git repo with beads files
 func setupTestGitRepo(t *testing.T) (string, func()) {

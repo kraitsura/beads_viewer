@@ -164,6 +164,16 @@ type Dependency struct {
 	CreatedBy   string         `json:"created_by"`
 }
 
+// IssueMetrics holds computed metrics for export/robot consumers.
+type IssueMetrics struct {
+	PageRank          float64 `json:"pagerank,omitempty"`
+	Betweenness       float64 `json:"betweenness,omitempty"`
+	CriticalPathDepth int     `json:"critical_path_depth,omitempty"`
+	TriageScore       float64 `json:"triage_score,omitempty"`
+	BlocksCount       int     `json:"blocks_count,omitempty"`
+	BlockedByCount    int     `json:"blocked_by_count,omitempty"`
+}
+
 // DependencyType categorizes the relationship
 type DependencyType string
 

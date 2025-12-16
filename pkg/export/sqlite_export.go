@@ -26,6 +26,7 @@ import (
 type SQLiteExporter struct {
 	Issues  []*model.Issue
 	Deps    []*model.Dependency
+	Metrics map[string]*model.IssueMetrics
 	Stats   *analysis.GraphStats
 	Triage  *analysis.TriageResult
 	Config  SQLiteExportConfig
@@ -33,14 +34,29 @@ type SQLiteExporter struct {
 }
 
 // NewSQLiteExporter creates a new exporter with the given data.
-func NewSQLiteExporter(issues []*model.Issue, deps []*model.Dependency, stats *analysis.GraphStats, triage *analysis.TriageResult) *SQLiteExporter {
-	return &SQLiteExporter{
+// The third parameter may be either:
+//   - map[string]*model.IssueMetrics (explicit metrics)
+//   - *analysis.GraphStats (for computed metrics)
+//
+// This keeps backward compatibility with legacy call sites/tests.
+func NewSQLiteExporter(issues []*model.Issue, deps []*model.Dependency, metricsOrStats interface{}, triage *analysis.TriageResult) *SQLiteExporter {
+	exp := &SQLiteExporter{
 		Issues: issues,
 		Deps:   deps,
-		Stats:  stats,
 		Triage: triage,
 		Config: DefaultSQLiteExportConfig(),
 	}
+	switch v := metricsOrStats.(type) {
+	case map[string]*model.IssueMetrics:
+		exp.Metrics = v
+	case *analysis.GraphStats:
+		exp.Stats = v
+	case nil:
+		// nothing
+	default:
+		// ignore unsupported type to avoid panics in callers
+	}
+	return exp
 }
 
 // SetGitHash sets the git commit hash for export metadata.
@@ -439,9 +455,28 @@ func (e *SQLiteExporter) chunkIfNeeded(outputDir, dbPath string) error {
 		}
 	}
 
+	// Populate chunk metadata
 	config.Chunked = true
 	config.ChunkCount = chunkNum
 	config.ChunkSize = e.Config.ChunkSize
+	config.Chunks = make([]ChunkInfo, 0, chunkNum)
+
+	// Re-read chunks to record paths and hashes
+	for i := 0; i < chunkNum; i++ {
+		name := fmt.Sprintf("%05d.bin", i)
+		path := filepath.Join("chunks", name)
+		fullPath := filepath.Join(outputDir, path)
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			return fmt.Errorf("hash chunk %d: %w", i, err)
+		}
+		h := sha256.Sum256(data)
+		config.Chunks = append(config.Chunks, ChunkInfo{
+			Path: path,
+			Hash: hex.EncodeToString(h[:]),
+			Size: int64(len(data)),
+		})
+	}
 
 	return writeJSON(filepath.Join(outputDir, "beads.sqlite3.config.json"), config)
 }
@@ -479,14 +514,6 @@ func (e *SQLiteExporter) GetExportedIssues() []ExportIssue {
 		}
 	}
 
-	// Get metrics maps from stats
-	var pageRankMap, betweennessMap, criticalPathMap map[string]float64
-	if e.Stats != nil {
-		pageRankMap = e.Stats.PageRank()
-		betweennessMap = e.Stats.Betweenness()
-		criticalPathMap = e.Stats.CriticalPathScore()
-	}
-
 	result := make([]ExportIssue, len(e.Issues))
 	for i, issue := range e.Issues {
 		exp := ExportIssue{
@@ -503,17 +530,41 @@ func (e *SQLiteExporter) GetExportedIssues() []ExportIssue {
 			ClosedAt:    issue.ClosedAt,
 		}
 
-		if e.Stats != nil {
-			exp.PageRank = pageRankMap[issue.ID]
-			exp.Betweenness = betweennessMap[issue.ID]
-			exp.CriticalPath = int(criticalPathMap[issue.ID])
+		if m := e.Metrics; m != nil {
+			if mm, ok := m[issue.ID]; ok && mm != nil {
+				exp.PageRank = mm.PageRank
+				exp.Betweenness = mm.Betweenness
+				exp.CriticalPath = mm.CriticalPathDepth
+				exp.TriageScore = mm.TriageScore
+				exp.BlocksCount = mm.BlocksCount
+				exp.BlockedByCount = mm.BlockedByCount
+			}
+		} else if e.Stats != nil {
+			exp.PageRank = e.Stats.GetPageRankScore(issue.ID)
+			exp.Betweenness = e.Stats.Betweenness()[issue.ID]
+			exp.CriticalPath = int(e.Stats.GetCriticalPathScore(issue.ID))
 		}
 
-		exp.TriageScore = triageScores[issue.ID]
-		exp.BlocksIDs = blocksIDs[issue.ID]
-		exp.BlockedByIDs = blockedByIDs[issue.ID]
-		exp.BlocksCount = len(exp.BlocksIDs)
-		exp.BlockedByCount = len(exp.BlockedByIDs)
+		// Fallback triage score from recommendations map
+		if exp.TriageScore == 0 {
+			exp.TriageScore = triageScores[issue.ID]
+		}
+		// Fallback blocker counts
+		if exp.BlocksCount == 0 {
+			exp.BlocksIDs = blocksIDs[issue.ID]
+			exp.BlocksCount = len(exp.BlocksIDs)
+		}
+		if exp.BlockedByCount == 0 {
+			exp.BlockedByIDs = blockedByIDs[issue.ID]
+			exp.BlockedByCount = len(exp.BlockedByIDs)
+		}
+		// Always set IDs for downstream UI
+		if exp.BlocksIDs == nil {
+			exp.BlocksIDs = blocksIDs[issue.ID]
+		}
+		if exp.BlockedByIDs == nil {
+			exp.BlockedByIDs = blockedByIDs[issue.ID]
+		}
 
 		result[i] = exp
 	}

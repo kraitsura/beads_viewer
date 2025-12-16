@@ -101,11 +101,19 @@ func DefaultSQLiteExportConfig() SQLiteExportConfig {
 
 // ChunkConfig describes how a large database was chunked.
 type ChunkConfig struct {
-	Chunked    bool   `json:"chunked"`
-	ChunkCount int    `json:"chunk_count"`
-	ChunkSize  int64  `json:"chunk_size"`
-	TotalSize  int64  `json:"total_size"`
-	Hash       string `json:"hash,omitempty"`
+	Chunked    bool        `json:"chunked"`
+	ChunkCount int         `json:"chunk_count"`
+	ChunkSize  int64       `json:"chunk_size"`
+	TotalSize  int64       `json:"total_size"`
+	Hash       string      `json:"hash,omitempty"`
+	Chunks     []ChunkInfo `json:"chunks,omitempty"`
+}
+
+// ChunkInfo describes an individual chunk file.
+type ChunkInfo struct {
+	Path string `json:"path"`
+	Hash string `json:"hash,omitempty"`
+	Size int64  `json:"size,omitempty"`
 }
 
 // TriageRecommendation represents a single triage recommendation for export.

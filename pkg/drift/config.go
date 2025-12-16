@@ -231,32 +231,57 @@ func (c *Config) IsAlertDisabled(alertType string) bool {
 
 // GetStalenessThresholds returns the staleness thresholds for an issue based on its labels (bv-167)
 // Returns warn days, critical days, and in-progress multiplier.
-// Uses the tightest (smallest) thresholds from all matching labels.
+// If multiple labels have overrides, the tightest (smallest) non-zero thresholds among them are used.
+// If valid overrides exist, they supersede the global default (allowing looser thresholds).
+// Unset (0) values in overrides inherit the global default.
 func (c *Config) GetStalenessThresholds(labels []string) (warnDays, critDays int, inProgressMult float64) {
-	warnDays = c.StaleWarningDays
-	critDays = c.StaleCriticalDays
-	inProgressMult = c.InProgressStaleMultiplier
+	// Identify applicable overrides
+	var applicable []*LabelConfig
+	for _, label := range labels {
+		if lc, ok := c.LabelOverrides[label]; ok && lc != nil {
+			applicable = append(applicable, lc)
+		}
+	}
 
-	if len(c.LabelOverrides) == 0 {
+	// If no overrides, return global defaults
+	if len(applicable) == 0 {
+		return c.StaleWarningDays, c.StaleCriticalDays, c.InProgressStaleMultiplier
+	}
+
+	// Helper to resolve a config value: use override if set, else global default
+	resolve := func(lc *LabelConfig) (w, cr int, m float64) {
+		w = lc.StaleWarningDays
+		if w <= 0 {
+			w = c.StaleWarningDays
+		}
+		cr = lc.StaleCriticalDays
+		if cr <= 0 {
+			cr = c.StaleCriticalDays
+		}
+		m = lc.InProgressStaleMultiplier
+		if m <= 0 {
+			m = c.InProgressStaleMultiplier
+		}
 		return
 	}
 
-	// Check each label for overrides, using the tightest thresholds
-	for _, label := range labels {
-		lc, ok := c.LabelOverrides[label]
-		if !ok || lc == nil {
-			continue
+	// Initialize with the first applicable override
+	warnDays, critDays, inProgressMult = resolve(applicable[0])
+
+	// Min-reduce against remaining overrides
+	for i := 1; i < len(applicable); i++ {
+		w, cr, m := resolve(applicable[i])
+		if w < warnDays {
+			warnDays = w
 		}
-		if lc.StaleWarningDays > 0 && lc.StaleWarningDays < warnDays {
-			warnDays = lc.StaleWarningDays
+		if cr < critDays {
+			critDays = cr
 		}
-		if lc.StaleCriticalDays > 0 && lc.StaleCriticalDays < critDays {
-			critDays = lc.StaleCriticalDays
-		}
-		if lc.InProgressStaleMultiplier > 0 && lc.InProgressStaleMultiplier < inProgressMult {
-			inProgressMult = lc.InProgressStaleMultiplier
+		if m < inProgressMult {
+			inProgressMult = m
 		}
 	}
+
 	return
 }
 
