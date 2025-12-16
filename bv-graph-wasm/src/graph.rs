@@ -434,6 +434,57 @@ impl DiGraph {
         let nodes = dependency_cone(self, node);
         serde_wasm_bindgen::to_value(&nodes).unwrap_or(JsValue::NULL)
     }
+
+    // ========================================================================
+    // Actionable queries (work with closed_set to determine workable items)
+    // ========================================================================
+
+    /// Get direct blockers (predecessors) of a node.
+    /// These are issues that must be completed before this node can start.
+    #[wasm_bindgen(js_name = blockers)]
+    pub fn blockers(&self, node: usize) -> JsValue {
+        use crate::reachability::blockers;
+        let nodes = blockers(self, node);
+        serde_wasm_bindgen::to_value(&nodes).unwrap_or(JsValue::NULL)
+    }
+
+    /// Get direct dependents (successors) of a node.
+    /// These are issues that depend on this node being completed.
+    #[wasm_bindgen(js_name = dependents)]
+    pub fn dependents(&self, node: usize) -> JsValue {
+        use crate::reachability::dependents;
+        let nodes = dependents(self, node);
+        serde_wasm_bindgen::to_value(&nodes).unwrap_or(JsValue::NULL)
+    }
+
+    /// Get all actionable nodes (nodes with all predecessors in closed_set).
+    /// closed_set is an array of bytes where non-zero means closed.
+    #[wasm_bindgen(js_name = actionableNodes)]
+    pub fn actionable_nodes(&self, closed_set: &[u8]) -> JsValue {
+        use crate::reachability::actionable_nodes;
+        let closed: Vec<bool> = closed_set.iter().map(|&b| b != 0).collect();
+        let nodes = actionable_nodes(self, &closed);
+        serde_wasm_bindgen::to_value(&nodes).unwrap_or(JsValue::NULL)
+    }
+
+    /// Get open blockers for a node (predecessors not in closed_set).
+    /// closed_set is an array of bytes where non-zero means closed.
+    #[wasm_bindgen(js_name = openBlockers)]
+    pub fn open_blockers(&self, node: usize, closed_set: &[u8]) -> JsValue {
+        use crate::reachability::open_blockers;
+        let closed: Vec<bool> = closed_set.iter().map(|&b| b != 0).collect();
+        let nodes = open_blockers(self, node, &closed);
+        serde_wasm_bindgen::to_value(&nodes).unwrap_or(JsValue::NULL)
+    }
+
+    /// Get count of open blockers for a node.
+    /// closed_set is an array of bytes where non-zero means closed.
+    #[wasm_bindgen(js_name = openBlockerCount)]
+    pub fn open_blocker_count(&self, node: usize, closed_set: &[u8]) -> usize {
+        use crate::reachability::open_blocker_count;
+        let closed: Vec<bool> = closed_set.iter().map(|&b| b != 0).collect();
+        open_blocker_count(self, node, &closed)
+    }
 }
 
 // Internal methods (not exposed to WASM)
