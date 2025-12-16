@@ -154,21 +154,23 @@ type Model struct {
 	updateURL       string
 
 	// Focus and View State
-	focused                focus
-	isSplitView            bool
-	isBoardView            bool
-	isGraphView            bool
-	isActionableView       bool
-	isHistoryView          bool
-	showDetails            bool
-	showHelp               bool
-	showQuitConfirm        bool
-	ready                  bool
-	width                  int
-	height                 int
-	showLabelHealthDetail  bool
-	labelHealthDetail      *analysis.LabelHealth
-	labelHealthDetailFlows []labelCount
+	focused               focus
+	isSplitView           bool
+	isBoardView           bool
+	isGraphView           bool
+	isActionableView      bool
+	isHistoryView         bool
+	showDetails           bool
+	showHelp              bool
+	showQuitConfirm       bool
+	ready                 bool
+	width                 int
+	height                int
+	showLabelHealthDetail bool
+	labelHealthDetail     *analysis.LabelHealth
+	labelHealthDetailFlow labelFlowSummary
+	labelHealthCached     bool
+	labelHealthCache      analysis.LabelAnalysisResult
 
 	// Actionable view
 	actionableView ActionableModel
@@ -227,28 +229,48 @@ type labelCount struct {
 	Count int
 }
 
+type labelFlowSummary struct {
+	Incoming []labelCount
+	Outgoing []labelCount
+}
+
 // getCrossFlowsForLabel returns outgoing cross-label dependency counts for a label
-func (m Model) getCrossFlowsForLabel(label string) []labelCount {
+func (m Model) getCrossFlowsForLabel(label string) labelFlowSummary {
 	cfg := analysis.DefaultLabelHealthConfig()
 	flow := analysis.ComputeCrossLabelFlow(m.issues, cfg)
-	counts := make(map[string]int)
+	out := labelFlowSummary{}
+	inCounts := make(map[string]int)
+	outCounts := make(map[string]int)
 
 	for _, dep := range flow.Dependencies {
+		if dep.ToLabel == label {
+			inCounts[dep.FromLabel] += dep.IssueCount
+		}
 		if dep.FromLabel == label {
-			counts[dep.ToLabel] += dep.IssueCount
+			outCounts[dep.ToLabel] += dep.IssueCount
 		}
 	}
 
-	var out []labelCount
-	for lbl, c := range counts {
-		out = append(out, labelCount{Label: lbl, Count: c})
+	for lbl, c := range inCounts {
+		out.Incoming = append(out.Incoming, labelCount{Label: lbl, Count: c})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Count == out[j].Count {
-			return out[i].Label < out[j].Label
+	for lbl, c := range outCounts {
+		out.Outgoing = append(out.Outgoing, labelCount{Label: lbl, Count: c})
+	}
+
+	sort.Slice(out.Incoming, func(i, j int) bool {
+		if out.Incoming[i].Count == out.Incoming[j].Count {
+			return out.Incoming[i].Label < out.Incoming[j].Label
 		}
-		return out[i].Count > out[j].Count
+		return out.Incoming[i].Count > out.Incoming[j].Count
 	})
+	sort.Slice(out.Outgoing, func(i, j int) bool {
+		if out.Outgoing[i].Count == out.Outgoing[j].Count {
+			return out.Outgoing[i].Label < out.Outgoing[j].Label
+		}
+		return out.Outgoing[i].Count > out.Outgoing[j].Count
+	})
+
 	return out
 }
 
@@ -946,12 +968,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.isBoardView = false
 				m.isActionableView = false
 				m.focused = focusLabelDashboard
-				// Compute label health (fast; phase1 metrics only needed)
-				cfg := analysis.DefaultLabelHealthConfig()
-				health := analysis.ComputeAllLabelHealth(m.issues, cfg, time.Now().UTC())
-				m.labelDashboard.SetData(health.Labels)
+				// Compute label health (fast; phase1 metrics only needed) with caching
+				if !m.labelHealthCached {
+					cfg := analysis.DefaultLabelHealthConfig()
+					m.labelHealthCache = analysis.ComputeAllLabelHealth(m.issues, cfg, time.Now().UTC())
+					m.labelHealthCached = true
+				}
+				m.labelDashboard.SetData(m.labelHealthCache.Labels)
 				m.labelDashboard.SetSize(m.width, m.height-1)
-				m.statusMsg = fmt.Sprintf("Labels: %d total • critical %d • warning %d", health.TotalLabels, health.CriticalCount, health.WarningCount)
+				m.statusMsg = fmt.Sprintf("Labels: %d total • critical %d • warning %d", m.labelHealthCache.TotalLabels, m.labelHealthCache.CriticalCount, m.labelHealthCache.WarningCount)
 				m.statusIsError = false
 				return m, nil
 
@@ -999,7 +1024,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.showLabelHealthDetail = true
 						m.labelHealthDetail = &lh
 						// Precompute cross-label flows for this label
-						m.labelHealthDetailFlows = m.getCrossFlowsForLabel(lh.Label)
+						m.labelHealthDetailFlow = m.getCrossFlowsForLabel(lh.Label)
 						return m, nil
 					}
 				}
@@ -2003,15 +2028,27 @@ func (m Model) renderLabelHealthDetail(lh analysis.LabelHealth) string {
 	sb.WriteString(bar(lh.Flow.FlowScore))
 	sb.WriteString("\n\n")
 
-	// Cross-Label Flow Table (outgoing dependencies)
-	if len(m.labelHealthDetailFlows) > 0 {
-		sb.WriteString(labelStyle.Render("Blocking other labels:"))
+	// Cross-Label Flow Table (incoming/outgoing dependencies)
+	if len(m.labelHealthDetailFlow.Incoming) > 0 || len(m.labelHealthDetailFlow.Outgoing) > 0 {
+		sb.WriteString(labelStyle.Render("Cross-label deps:"))
 		sb.WriteString("\n")
-		// Simple ASCII table for flows
-		for _, flow := range m.labelHealthDetailFlows {
-			line := fmt.Sprintf("  %-20s %d issues", flow.Label, flow.Count)
-			sb.WriteString(valStyle.Render(line))
+		if len(m.labelHealthDetailFlow.Incoming) > 0 {
+			sb.WriteString(valStyle.Render("  Incoming:"))
 			sb.WriteString("\n")
+			for _, flow := range m.labelHealthDetailFlow.Incoming {
+				line := fmt.Sprintf("    %-18s %d issues", flow.Label, flow.Count)
+				sb.WriteString(valStyle.Render(line))
+				sb.WriteString("\n")
+			}
+		}
+		if len(m.labelHealthDetailFlow.Outgoing) > 0 {
+			sb.WriteString(valStyle.Render("  Outgoing:"))
+			sb.WriteString("\n")
+			for _, flow := range m.labelHealthDetailFlow.Outgoing {
+				line := fmt.Sprintf("    %-18s %d issues", flow.Label, flow.Count)
+				sb.WriteString(valStyle.Render(line))
+				sb.WriteString("\n")
+			}
 		}
 		sb.WriteString("\n")
 	}
@@ -3011,18 +3048,19 @@ func (m *Model) copyIssueToClipboard() {
 	m.statusIsError = false
 }
 
-// openInEditor opens the beads.jsonl file in the user's preferred editor
+// openInEditor opens the beads file in the user's preferred editor
+// Uses m.beadsPath which respects issues.jsonl (canonical per beads upstream)
 func (m *Model) openInEditor() {
-	cwd, err := os.Getwd()
-	if err != nil {
-		m.statusMsg = "❌ Cannot get working directory"
+	// Use the configured beadsPath instead of hardcoded path
+	if m.beadsPath == "" {
+		m.statusMsg = "❌ No beads file configured"
 		m.statusIsError = true
 		return
 	}
 
-	beadsFile := filepath.Join(cwd, ".beads", "beads.jsonl")
+	beadsFile := m.beadsPath
 	if _, err := os.Stat(beadsFile); os.IsNotExist(err) {
-		m.statusMsg = "❌ No .beads/beads.jsonl file found"
+		m.statusMsg = fmt.Sprintf("❌ Beads file not found: %s", beadsFile)
 		m.statusIsError = true
 		return
 	}
@@ -3077,8 +3115,7 @@ func (m *Model) openInEditor() {
 
 	// Launch GUI editor in background
 	cmd := exec.Command(editor, beadsFile)
-	err = cmd.Start()
-	if err != nil {
+	if err := cmd.Start(); err != nil {
 		m.statusMsg = fmt.Sprintf("❌ Failed to open editor: %v", err)
 		m.statusIsError = true
 		return
