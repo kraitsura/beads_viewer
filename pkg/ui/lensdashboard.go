@@ -58,8 +58,8 @@ type FlatNode struct {
 	BlockedBy  string // ID of blocker if blocked
 }
 
-// LabelDashboardModel represents the label dashboard view
-type LabelDashboardModel struct {
+// LensDashboardModel represents the label dashboard view
+type LensDashboardModel struct {
 	// Data
 	labelName string
 	viewMode  string // "label" or "epic"
@@ -129,9 +129,9 @@ type LabelDashboardModel struct {
 	theme  Theme
 }
 
-// NewLabelDashboardModel creates a new label dashboard for the given label
-func NewLabelDashboardModel(labelName string, allIssues []model.Issue, issueMap map[string]*model.Issue, theme Theme) LabelDashboardModel {
-	m := LabelDashboardModel{
+// NewLensDashboardModel creates a new label dashboard for the given label
+func NewLensDashboardModel(labelName string, allIssues []model.Issue, issueMap map[string]*model.Issue, theme Theme) LensDashboardModel {
+	m := LensDashboardModel{
 		labelName:        labelName,
 		viewMode:         "label",
 		allIssues:        allIssues,
@@ -165,14 +165,14 @@ func NewLabelDashboardModel(labelName string, allIssues []model.Issue, issueMap 
 	return m
 }
 
-// NewBeadDashboardModel creates a dashboard for any issue and its descendants/blocked issues.
+// NewBeadLensModel creates a dashboard for any issue and its descendants/blocked issues.
 // Unlike epic mode which only shows parent-child descendants, bead mode also includes
 // issues that are blocked by the entry issue (downstream dependency graph).
-func NewBeadDashboardModel(issueID string, allIssues []model.Issue, issueMap map[string]*model.Issue, theme Theme) LabelDashboardModel {
+func NewBeadLensModel(issueID string, allIssues []model.Issue, issueMap map[string]*model.Issue, theme Theme) LensDashboardModel {
 	issue, exists := issueMap[issueID]
 	if !exists {
 		// Return empty dashboard if issue not found
-		return LabelDashboardModel{
+		return LensDashboardModel{
 			labelName:        "Not Found: " + issueID,
 			viewMode:         "bead",
 			allIssues:        allIssues,
@@ -186,7 +186,7 @@ func NewBeadDashboardModel(issueID string, allIssues []model.Issue, issueMap map
 		}
 	}
 
-	m := LabelDashboardModel{
+	m := LensDashboardModel{
 		labelName:        issue.Title,
 		viewMode:         "bead",
 		epicID:           issueID, // Reuse epicID field for entry point
@@ -220,9 +220,9 @@ func NewBeadDashboardModel(issueID string, allIssues []model.Issue, issueMap map
 	return m
 }
 
-// NewEpicDashboardModel creates a dashboard for an epic's children
-func NewEpicDashboardModel(epicID string, epicTitle string, allIssues []model.Issue, issueMap map[string]*model.Issue, theme Theme) LabelDashboardModel {
-	m := LabelDashboardModel{
+// NewEpicLensModel creates a dashboard for an epic's children
+func NewEpicLensModel(epicID string, epicTitle string, allIssues []model.Issue, issueMap map[string]*model.Issue, theme Theme) LensDashboardModel {
+	m := LensDashboardModel{
 		labelName:        epicTitle,
 		viewMode:         "epic",
 		epicID:           epicID,
@@ -547,7 +547,7 @@ func buildBeadDescendantsByDepth(beadID string, issues []model.Issue) map[DepthO
 }
 
 // buildGraphs builds the upstream and downstream dependency graphs
-func (m *LabelDashboardModel) buildGraphs() {
+func (m *LensDashboardModel) buildGraphs() {
 	m.downstream = make(map[string][]string)
 	m.upstream = make(map[string][]string)
 	m.blockedByMap = make(map[string]string)
@@ -589,7 +589,7 @@ func (m *LabelDashboardModel) buildGraphs() {
 }
 
 // buildTree builds the tree structure based on current depth
-func (m *LabelDashboardModel) buildTree() {
+func (m *LensDashboardModel) buildTree() {
 	m.roots = nil
 	m.flatNodes = nil
 	m.totalCount = 0
@@ -708,7 +708,7 @@ func (m *LabelDashboardModel) buildTree() {
 }
 
 // buildTreeNode recursively builds a tree node
-func (m *LabelDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool) *TreeNode {
+func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool) *TreeNode {
 	if seen[issue.ID] {
 		return nil
 	}
@@ -781,7 +781,7 @@ func (m *LabelDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth i
 // addUpstreamContextBlockers finds context issues that block primaries but weren't
 // included via downstream traversal, and adds them to the tree.
 // This ensures parity with workstream view which includes both directions.
-func (m *LabelDashboardModel) addUpstreamContextBlockers(seen map[string]bool, maxDepth int) {
+func (m *LensDashboardModel) addUpstreamContextBlockers(seen map[string]bool, maxDepth int) {
 	// Use depth-appropriate primary IDs
 	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
 
@@ -895,7 +895,7 @@ func (m *LabelDashboardModel) addUpstreamContextBlockers(seen map[string]bool, m
 
 // buildContextBlockerNode builds a tree node for context blockers,
 // following downstream within the context blocker set
-func (m *LabelDashboardModel) buildContextBlockerNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, contextBlockerSet map[string]bool) *TreeNode {
+func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, contextBlockerSet map[string]bool) *TreeNode {
 	if seen[issue.ID] {
 		return nil
 	}
@@ -966,7 +966,7 @@ func (m *LabelDashboardModel) buildContextBlockerNode(issue model.Issue, depth, 
 }
 
 // flattenTree converts the tree to a flat list for display
-func (m *LabelDashboardModel) flattenTree() {
+func (m *LensDashboardModel) flattenTree() {
 	m.flatNodes = nil
 	for _, root := range m.roots {
 		m.flattenNode(root)
@@ -974,7 +974,7 @@ func (m *LabelDashboardModel) flattenTree() {
 }
 
 // flattenNode recursively flattens a node and its children
-func (m *LabelDashboardModel) flattenNode(node *TreeNode) {
+func (m *LensDashboardModel) flattenNode(node *TreeNode) {
 	prefix := m.buildTreePrefix(node)
 	status := m.getIssueStatus(node.Issue)
 
@@ -992,7 +992,7 @@ func (m *LabelDashboardModel) flattenNode(node *TreeNode) {
 }
 
 // buildTreePrefix builds the tree line prefix for a node
-func (m *LabelDashboardModel) buildTreePrefix(node *TreeNode) string {
+func (m *LensDashboardModel) buildTreePrefix(node *TreeNode) string {
 	if node.Depth == 0 {
 		return ""
 	}
@@ -1019,7 +1019,7 @@ func (m *LabelDashboardModel) buildTreePrefix(node *TreeNode) string {
 }
 
 // getIssueStatus returns the effective status of an issue
-func (m *LabelDashboardModel) getIssueStatus(issue model.Issue) string {
+func (m *LensDashboardModel) getIssueStatus(issue model.Issue) string {
 	if issue.Status == model.StatusClosed {
 		return "closed"
 	}
@@ -1037,7 +1037,7 @@ func (m *LabelDashboardModel) getIssueStatus(issue model.Issue) string {
 }
 
 // getStatusOrder returns sort order for status (ready first)
-func (m *LabelDashboardModel) getStatusOrder(issue model.Issue) int {
+func (m *LensDashboardModel) getStatusOrder(issue model.Issue) int {
 	status := m.getIssueStatus(issue)
 	switch status {
 	case "ready":
@@ -1054,7 +1054,7 @@ func (m *LabelDashboardModel) getStatusOrder(issue model.Issue) int {
 }
 
 // CycleDepth cycles through depth options
-func (m *LabelDashboardModel) CycleDepth() {
+func (m *LensDashboardModel) CycleDepth() {
 	switch m.dependencyDepth {
 	case Depth1:
 		m.dependencyDepth = Depth2
@@ -1078,7 +1078,7 @@ func (m *LabelDashboardModel) CycleDepth() {
 // GetPrimaryIDsForDepth returns the appropriate primaryIDs for the current depth.
 // At Depth1, returns only direct label matches.
 // At Depth2+, returns expanded set including descendants.
-func (m *LabelDashboardModel) GetPrimaryIDsForDepth() map[string]bool {
+func (m *LensDashboardModel) GetPrimaryIDsForDepth() map[string]bool {
 	// Epic and bead modes: use depth-specific descendant maps
 	if (m.viewMode == "epic" || m.viewMode == "bead") && m.epicDescendantsByDepth != nil {
 		if depthSet, ok := m.epicDescendantsByDepth[m.dependencyDepth]; ok {
@@ -1099,7 +1099,7 @@ func (m *LabelDashboardModel) GetPrimaryIDsForDepth() map[string]bool {
 
 // recomputeWorkstreams detects workstreams using depth-appropriate primaryIDs
 // and the same issue set that flat view shows (primary + context blockers)
-func (m *LabelDashboardModel) recomputeWorkstreams() {
+func (m *LensDashboardModel) recomputeWorkstreams() {
 	selectedLabel := m.labelName
 	primaryIDs := m.GetPrimaryIDsForDepth()
 
@@ -1114,7 +1114,7 @@ func (m *LabelDashboardModel) recomputeWorkstreams() {
 // getDisplayIssues returns the issues that should be displayed in the current view.
 // This is the union of primary issues (depth-appropriate) and context blockers.
 // Used to ensure flat and workstream views show the same issue set.
-func (m *LabelDashboardModel) getDisplayIssues() []model.Issue {
+func (m *LensDashboardModel) getDisplayIssues() []model.Issue {
 	// If flatNodes is populated, extract issues from there
 	// This ensures we get exactly what flat view would show
 	if len(m.flatNodes) > 0 {
@@ -1141,25 +1141,25 @@ func (m *LabelDashboardModel) getDisplayIssues() []model.Issue {
 }
 
 // GetDepth returns the current depth setting
-func (m *LabelDashboardModel) GetDepth() DepthOption {
+func (m *LensDashboardModel) GetDepth() DepthOption {
 	return m.dependencyDepth
 }
 
 // SetDepth sets the dependency depth and rebuilds the tree
-func (m *LabelDashboardModel) SetDepth(depth DepthOption) {
+func (m *LensDashboardModel) SetDepth(depth DepthOption) {
 	m.dependencyDepth = depth
 	m.buildTree()
 	m.recomputeWorkstreams()
 }
 
 // SetSize updates the dashboard dimensions
-func (m *LabelDashboardModel) SetSize(width, height int) {
+func (m *LensDashboardModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
 }
 
 // MoveUp moves cursor up
-func (m *LabelDashboardModel) MoveUp() {
+func (m *LensDashboardModel) MoveUp() {
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		m.moveUpWS()
 		return
@@ -1172,7 +1172,7 @@ func (m *LabelDashboardModel) MoveUp() {
 }
 
 // MoveDown moves cursor down
-func (m *LabelDashboardModel) MoveDown() {
+func (m *LensDashboardModel) MoveDown() {
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		m.moveDownWS()
 		return
@@ -1185,7 +1185,7 @@ func (m *LabelDashboardModel) MoveDown() {
 }
 
 // moveUpWS moves cursor up in workstream view
-func (m *LabelDashboardModel) moveUpWS() {
+func (m *LensDashboardModel) moveUpWS() {
 	if len(m.workstreams) == 0 {
 		return
 	}
@@ -1211,7 +1211,7 @@ func (m *LabelDashboardModel) moveUpWS() {
 }
 
 // getVisibleIssueCount returns the number of visible issues for a workstream
-func (m *LabelDashboardModel) getVisibleIssueCount(wsIdx int) int {
+func (m *LensDashboardModel) getVisibleIssueCount(wsIdx int) int {
 	if wsIdx >= len(m.workstreams) {
 		return 0
 	}
@@ -1235,7 +1235,7 @@ func (m *LabelDashboardModel) getVisibleIssueCount(wsIdx int) int {
 }
 
 // moveDownWS moves cursor down in workstream view
-func (m *LabelDashboardModel) moveDownWS() {
+func (m *LensDashboardModel) moveDownWS() {
 	if len(m.workstreams) == 0 {
 		return
 	}
@@ -1264,7 +1264,7 @@ func (m *LabelDashboardModel) moveDownWS() {
 }
 
 // updateSelectedIssueFromWS updates selectedIssueID based on workstream cursor
-func (m *LabelDashboardModel) updateSelectedIssueFromWS() {
+func (m *LensDashboardModel) updateSelectedIssueFromWS() {
 	if len(m.workstreams) == 0 {
 		m.selectedIssueID = ""
 		return
@@ -1310,7 +1310,7 @@ func (m *LabelDashboardModel) updateSelectedIssueFromWS() {
 }
 
 // ensureVisibleWS adjusts wsScroll to keep cursor visible
-func (m *LabelDashboardModel) ensureVisibleWS() {
+func (m *LensDashboardModel) ensureVisibleWS() {
 	// Calculate the line number of the current cursor position
 	cursorLine := m.getWSCursorLine()
 
@@ -1348,7 +1348,7 @@ func (m *LabelDashboardModel) ensureVisibleWS() {
 }
 
 // getWSCursorLine calculates the line number of the current cursor in workstream view
-func (m *LabelDashboardModel) getWSCursorLine() int {
+func (m *LensDashboardModel) getWSCursorLine() int {
 	line := 0
 	for wsIdx := 0; wsIdx < len(m.workstreams); wsIdx++ {
 		ws := m.workstreams[wsIdx]
@@ -1394,7 +1394,7 @@ func (m *LabelDashboardModel) getWSCursorLine() int {
 }
 
 // getTotalWSLines calculates total lines in workstream view
-func (m *LabelDashboardModel) getTotalWSLines() int {
+func (m *LensDashboardModel) getTotalWSLines() int {
 	line := 0
 	for wsIdx := range m.workstreams {
 		ws := m.workstreams[wsIdx]
@@ -1420,7 +1420,7 @@ func (m *LabelDashboardModel) getTotalWSLines() int {
 }
 
 // ensureVisible adjusts scroll to keep cursor visible
-func (m *LabelDashboardModel) ensureVisible() {
+func (m *LensDashboardModel) ensureVisible() {
 	visibleLines := m.height - 8 // header, stats, footer
 	if visibleLines < 5 {
 		visibleLines = 5
@@ -1434,7 +1434,7 @@ func (m *LabelDashboardModel) ensureVisible() {
 }
 
 // NextSection jumps to next status group
-func (m *LabelDashboardModel) NextSection() {
+func (m *LensDashboardModel) NextSection() {
 	if len(m.flatNodes) == 0 {
 		return
 	}
@@ -1451,7 +1451,7 @@ func (m *LabelDashboardModel) NextSection() {
 }
 
 // PrevSection jumps to previous status group
-func (m *LabelDashboardModel) PrevSection() {
+func (m *LensDashboardModel) PrevSection() {
 	if len(m.flatNodes) == 0 {
 		return
 	}
@@ -1478,42 +1478,42 @@ func (m *LabelDashboardModel) PrevSection() {
 }
 
 // SelectedIssueID returns the ID of the currently selected issue
-func (m *LabelDashboardModel) SelectedIssueID() string {
+func (m *LensDashboardModel) SelectedIssueID() string {
 	return m.selectedIssueID
 }
 
 // LabelName returns the current label name
-func (m *LabelDashboardModel) LabelName() string {
+func (m *LensDashboardModel) LabelName() string {
 	return m.labelName
 }
 
 // IssueCount returns the total number of issues
-func (m *LabelDashboardModel) IssueCount() int {
+func (m *LensDashboardModel) IssueCount() int {
 	return m.totalCount
 }
 
 // ContextCount returns the number of context issues
-func (m *LabelDashboardModel) ContextCount() int {
+func (m *LensDashboardModel) ContextCount() int {
 	return m.contextCount
 }
 
 // PrimaryCount returns the number of primary issues
-func (m *LabelDashboardModel) PrimaryCount() int {
+func (m *LensDashboardModel) PrimaryCount() int {
 	return m.primaryCount
 }
 
 // GetViewType returns the current view type
-func (m *LabelDashboardModel) GetViewType() ViewType {
+func (m *LensDashboardModel) GetViewType() ViewType {
 	return m.viewType
 }
 
 // IsWorkstreamView returns true if in workstream view mode
-func (m *LabelDashboardModel) IsWorkstreamView() bool {
+func (m *LensDashboardModel) IsWorkstreamView() bool {
 	return m.viewType == ViewTypeWorkstream
 }
 
 // ToggleViewType toggles between flat and workstream view
-func (m *LabelDashboardModel) ToggleViewType() {
+func (m *LensDashboardModel) ToggleViewType() {
 	if m.viewType == ViewTypeFlat {
 		m.viewType = ViewTypeWorkstream
 		// Initialize workstream cursor to first workstream header
@@ -1526,12 +1526,12 @@ func (m *LabelDashboardModel) ToggleViewType() {
 }
 
 // WorkstreamCount returns the number of workstreams detected
-func (m *LabelDashboardModel) WorkstreamCount() int {
+func (m *LensDashboardModel) WorkstreamCount() int {
 	return m.workstreamCount
 }
 
 // SetWorkstreams sets the detected workstreams
-func (m *LabelDashboardModel) SetWorkstreams(ws []analysis.Workstream) {
+func (m *LensDashboardModel) SetWorkstreams(ws []analysis.Workstream) {
 	// In epic mode, sort workstream containing the entry epic to the front
 	if m.viewMode == "epic" && m.epicID != "" && len(ws) > 1 {
 		sort.SliceStable(ws, func(i, j int) bool {
@@ -1561,12 +1561,12 @@ func (m *LabelDashboardModel) SetWorkstreams(ws []analysis.Workstream) {
 }
 
 // isEntryEpic checks if an issue ID is the entry point (for epic or bead view modes)
-func (m *LabelDashboardModel) isEntryEpic(issueID string) bool {
+func (m *LensDashboardModel) isEntryEpic(issueID string) bool {
 	return (m.viewMode == "epic" || m.viewMode == "bead") && m.epicID != "" && issueID == m.epicID
 }
 
 // ToggleWorkstreamExpand toggles expansion of the current workstream
-func (m *LabelDashboardModel) ToggleWorkstreamExpand() {
+func (m *LensDashboardModel) ToggleWorkstreamExpand() {
 	if len(m.workstreams) == 0 {
 		return
 	}
@@ -1589,12 +1589,12 @@ func (m *LabelDashboardModel) ToggleWorkstreamExpand() {
 }
 
 // IsWorkstreamExpanded returns whether the given workstream is expanded
-func (m *LabelDashboardModel) IsWorkstreamExpanded(wsIdx int) bool {
+func (m *LensDashboardModel) IsWorkstreamExpanded(wsIdx int) bool {
 	return m.wsExpanded[wsIdx]
 }
 
 // CurrentWorkstreamName returns the name of the currently selected workstream
-func (m *LabelDashboardModel) CurrentWorkstreamName() string {
+func (m *LensDashboardModel) CurrentWorkstreamName() string {
 	if len(m.workstreams) == 0 || m.wsCursor >= len(m.workstreams) {
 		return ""
 	}
@@ -1602,24 +1602,24 @@ func (m *LabelDashboardModel) CurrentWorkstreamName() string {
 }
 
 // IsOnWorkstreamHeader returns true if cursor is on a workstream header (not an issue)
-func (m *LabelDashboardModel) IsOnWorkstreamHeader() bool {
+func (m *LensDashboardModel) IsOnWorkstreamHeader() bool {
 	return m.wsIssueCursor < 0
 }
 
 // ToggleWSTreeView toggles dependency tree view within workstreams
-func (m *LabelDashboardModel) ToggleWSTreeView() {
+func (m *LensDashboardModel) ToggleWSTreeView() {
 	m.wsTreeView = !m.wsTreeView
 }
 
 // IsWSTreeView returns true if showing dependency tree in workstream view
-func (m *LabelDashboardModel) IsWSTreeView() bool {
+func (m *LensDashboardModel) IsWSTreeView() bool {
 	return m.wsTreeView
 }
 
 // === Sub-Workstream Support ===
 
 // ToggleSubdivision toggles subdivision mode on/off
-func (m *LabelDashboardModel) ToggleSubdivision() {
+func (m *LensDashboardModel) ToggleSubdivision() {
 	m.wsSubdivided = !m.wsSubdivided
 	if m.wsSubdivided && len(m.workstreamPtrs) > 0 {
 		// Apply subdivision to all workstreams
@@ -1632,17 +1632,17 @@ func (m *LabelDashboardModel) ToggleSubdivision() {
 }
 
 // IsSubdivided returns true if subdivision is active
-func (m *LabelDashboardModel) IsSubdivided() bool {
+func (m *LensDashboardModel) IsSubdivided() bool {
 	return m.wsSubdivided
 }
 
 // GetWorkstreamPointers returns pointers to workstreams for mutation
-func (m *LabelDashboardModel) GetWorkstreamPointers() []*analysis.Workstream {
+func (m *LensDashboardModel) GetWorkstreamPointers() []*analysis.Workstream {
 	return m.workstreamPtrs
 }
 
 // HasSubWorkstreams returns true if the given workstream has children
-func (m *LabelDashboardModel) HasSubWorkstreams(wsIdx int) bool {
+func (m *LensDashboardModel) HasSubWorkstreams(wsIdx int) bool {
 	if wsIdx >= len(m.workstreamPtrs) || m.workstreamPtrs[wsIdx] == nil {
 		return false
 	}
@@ -1650,7 +1650,7 @@ func (m *LabelDashboardModel) HasSubWorkstreams(wsIdx int) bool {
 }
 
 // IsSubWorkstreamExpanded returns whether a sub-workstream is expanded
-func (m *LabelDashboardModel) IsSubWorkstreamExpanded(wsIdx, subIdx int) bool {
+func (m *LensDashboardModel) IsSubWorkstreamExpanded(wsIdx, subIdx int) bool {
 	if m.subWSExpanded[wsIdx] == nil {
 		return false
 	}
@@ -1658,7 +1658,7 @@ func (m *LabelDashboardModel) IsSubWorkstreamExpanded(wsIdx, subIdx int) bool {
 }
 
 // ToggleSubWorkstreamExpand toggles expansion of a sub-workstream
-func (m *LabelDashboardModel) ToggleSubWorkstreamExpand(wsIdx, subIdx int) {
+func (m *LensDashboardModel) ToggleSubWorkstreamExpand(wsIdx, subIdx int) {
 	if m.subWSExpanded[wsIdx] == nil {
 		m.subWSExpanded[wsIdx] = make(map[int]bool)
 	}
@@ -1666,22 +1666,22 @@ func (m *LabelDashboardModel) ToggleSubWorkstreamExpand(wsIdx, subIdx int) {
 }
 
 // GetSubWorkstreamCursor returns the sub-workstream cursor for a workstream
-func (m *LabelDashboardModel) GetSubWorkstreamCursor(wsIdx int) int {
+func (m *LensDashboardModel) GetSubWorkstreamCursor(wsIdx int) int {
 	return m.subWsCursor[wsIdx]
 }
 
 // SetSubWorkstreamCursor sets the sub-workstream cursor for a workstream
-func (m *LabelDashboardModel) SetSubWorkstreamCursor(wsIdx, cursor int) {
+func (m *LensDashboardModel) SetSubWorkstreamCursor(wsIdx, cursor int) {
 	m.subWsCursor[wsIdx] = cursor
 }
 
 // GetWsCursor returns the current workstream cursor position
-func (m *LabelDashboardModel) GetWsCursor() int {
+func (m *LensDashboardModel) GetWsCursor() int {
 	return m.wsCursor
 }
 
 // NextWorkstream moves to the next workstream
-func (m *LabelDashboardModel) NextWorkstream() {
+func (m *LensDashboardModel) NextWorkstream() {
 	if len(m.workstreams) == 0 {
 		return
 	}
@@ -1693,7 +1693,7 @@ func (m *LabelDashboardModel) NextWorkstream() {
 }
 
 // PrevWorkstream moves to the previous workstream
-func (m *LabelDashboardModel) PrevWorkstream() {
+func (m *LensDashboardModel) PrevWorkstream() {
 	if len(m.workstreams) == 0 {
 		return
 	}
@@ -1705,7 +1705,7 @@ func (m *LabelDashboardModel) PrevWorkstream() {
 }
 
 // GoToTop moves cursor to the first item
-func (m *LabelDashboardModel) GoToTop() {
+func (m *LensDashboardModel) GoToTop() {
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		m.wsCursor = 0
 		m.wsIssueCursor = -1 // Go to first workstream header
@@ -1721,7 +1721,7 @@ func (m *LabelDashboardModel) GoToTop() {
 }
 
 // GoToBottom moves cursor to the last item
-func (m *LabelDashboardModel) GoToBottom() {
+func (m *LensDashboardModel) GoToBottom() {
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		m.wsCursor = len(m.workstreams) - 1
 		// Go to last visible issue in last workstream
@@ -1743,12 +1743,12 @@ func (m *LabelDashboardModel) GoToBottom() {
 }
 
 // GetWorkstreams returns the detected workstreams
-func (m *LabelDashboardModel) GetWorkstreams() []analysis.Workstream {
+func (m *LensDashboardModel) GetWorkstreams() []analysis.Workstream {
 	return m.workstreams
 }
 
 // buildWorkstreamTree builds a dependency tree for issues within a workstream
-func (m *LabelDashboardModel) buildWorkstreamTree(ws *analysis.Workstream) []*TreeNode {
+func (m *LensDashboardModel) buildWorkstreamTree(ws *analysis.Workstream) []*TreeNode {
 	if len(ws.Issues) == 0 {
 		return nil
 	}
@@ -1814,7 +1814,7 @@ func (m *LabelDashboardModel) buildWorkstreamTree(ws *analysis.Workstream) []*Tr
 }
 
 // buildWSTreeNode recursively builds a tree node for workstream tree view
-func (m *LabelDashboardModel) buildWSTreeNode(issue *model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, downstream map[string][]string, wsIssueMap map[string]*model.Issue) *TreeNode {
+func (m *LensDashboardModel) buildWSTreeNode(issue *model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, downstream map[string][]string, wsIssueMap map[string]*model.Issue) *TreeNode {
 	if seen[issue.ID] {
 		return nil
 	}
@@ -1852,7 +1852,7 @@ func (m *LabelDashboardModel) buildWSTreeNode(issue *model.Issue, depth, maxDept
 }
 
 // flattenWSTree converts workstream tree to flat list for display
-func (m *LabelDashboardModel) flattenWSTree(roots []*TreeNode) []FlatNode {
+func (m *LensDashboardModel) flattenWSTree(roots []*TreeNode) []FlatNode {
 	var flatNodes []FlatNode
 	for _, root := range roots {
 		m.flattenWSTreeNode(root, &flatNodes)
@@ -1860,7 +1860,7 @@ func (m *LabelDashboardModel) flattenWSTree(roots []*TreeNode) []FlatNode {
 	return flatNodes
 }
 
-func (m *LabelDashboardModel) flattenWSTreeNode(node *TreeNode, flatNodes *[]FlatNode) {
+func (m *LensDashboardModel) flattenWSTreeNode(node *TreeNode, flatNodes *[]FlatNode) {
 	prefix := m.buildTreePrefix(node)
 	status := m.getIssueStatus(node.Issue)
 
@@ -1878,7 +1878,7 @@ func (m *LabelDashboardModel) flattenWSTreeNode(node *TreeNode, flatNodes *[]Fla
 }
 
 // View renders the dashboard
-func (m *LabelDashboardModel) View() string {
+func (m *LensDashboardModel) View() string {
 	t := m.theme
 
 	var lines []string
@@ -1893,12 +1893,12 @@ func (m *LabelDashboardModel) View() string {
 		Foreground(t.Primary).
 		Bold(true)
 
-	modeIcon := ""
+	modeIcon := "🔭 " // Default lens icon for label mode
 	switch m.viewMode {
 	case "epic":
-		modeIcon = "📋 "
+		modeIcon = "◈ " // Epic icon
 	case "bead":
-		modeIcon = "🔷 "
+		modeIcon = "◇ " // Bead icon
 	}
 
 	// Progress bar
@@ -1919,7 +1919,7 @@ func (m *LabelDashboardModel) View() string {
 	contextIcon := t.Renderer.NewStyle().Foreground(t.Secondary).Render("○")
 	depthStyle := t.Renderer.NewStyle().Foreground(t.InProgress).Bold(true)
 
-	statsLine := fmt.Sprintf("%s %d labeled  %s %d context  Depth: [%s]",
+	statsLine := fmt.Sprintf("%s %d in lens  %s %d context  Depth: [%s]",
 		primaryIcon, m.primaryCount, contextIcon, m.contextCount,
 		depthStyle.Render(m.dependencyDepth.String()))
 	lines = append(lines, statsStyle.Render(statsLine))
@@ -1986,15 +1986,15 @@ func (m *LabelDashboardModel) View() string {
 	footerStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Italic(true)
 
 	// Show view type indicator and toggle hint
-	viewIndicator := "[flat]"
-	toggleHint := "w: workstreams"
+	viewIndicator := "[flat view]"
+	toggleHint := "w: streams"
 	navHint := "n/N: section"
-	enterHint := "enter: jump"
+	enterHint := "enter: focus"
 	treeHint := ""
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
-		viewIndicator = fmt.Sprintf("[workstreams: %d]", m.workstreamCount)
-		toggleHint = "w: flat view"
-		navHint = "n/N: workstream"
+		viewIndicator = fmt.Sprintf("[%d streams]", m.workstreamCount)
+		toggleHint = "w: flat"
+		navHint = "n/N: stream"
 		enterHint = "enter: expand"
 		if m.wsTreeView {
 			treeHint = " • D: list • d: depth"
@@ -2009,7 +2009,7 @@ func (m *LabelDashboardModel) View() string {
 }
 
 // renderWorkstreamView renders issues grouped by workstream
-func (m *LabelDashboardModel) renderWorkstreamView(contentWidth, visibleLines int, statsStyle lipgloss.Style) []string {
+func (m *LensDashboardModel) renderWorkstreamView(contentWidth, visibleLines int, statsStyle lipgloss.Style) []string {
 	t := m.theme
 	var allLines []string
 
@@ -2276,7 +2276,7 @@ func (m *LabelDashboardModel) renderWorkstreamView(contentWidth, visibleLines in
 }
 
 // renderMiniProgressBar renders a small progress bar
-func (m *LabelDashboardModel) renderMiniProgressBar(progress float64, width int) string {
+func (m *LensDashboardModel) renderMiniProgressBar(progress float64, width int) string {
 	t := m.theme
 
 	filled := int(progress * float64(width))
@@ -2298,7 +2298,7 @@ func (m *LabelDashboardModel) renderMiniProgressBar(progress float64, width int)
 }
 
 // renderStatusHeader renders a status section header
-func (m *LabelDashboardModel) renderStatusHeader(status string) string {
+func (m *LensDashboardModel) renderStatusHeader(status string) string {
 	t := m.theme
 
 	var color lipgloss.AdaptiveColor
@@ -2327,7 +2327,7 @@ func (m *LabelDashboardModel) renderStatusHeader(status string) string {
 }
 
 // renderTreeNode renders a single tree node
-func (m *LabelDashboardModel) renderTreeNode(fn FlatNode, isSelected bool, maxWidth int) string {
+func (m *LensDashboardModel) renderTreeNode(fn FlatNode, isSelected bool, maxWidth int) string {
 	t := m.theme
 	node := fn.Node
 
@@ -2404,7 +2404,7 @@ func (m *LabelDashboardModel) renderTreeNode(fn FlatNode, isSelected bool, maxWi
 		statusSuffix)
 }
 
-func (m *LabelDashboardModel) renderProgressBar(progress float64, width int) string {
+func (m *LensDashboardModel) renderProgressBar(progress float64, width int) string {
 	t := m.theme
 
 	filled := int(progress * float64(width))
@@ -2426,7 +2426,7 @@ func (m *LabelDashboardModel) renderProgressBar(progress float64, width int) str
 }
 
 // DumpToFile writes workstream information to a text file
-func (m *LabelDashboardModel) DumpToFile() (string, error) {
+func (m *LensDashboardModel) DumpToFile() (string, error) {
 	filename := fmt.Sprintf("%s-dump.txt", m.labelName)
 
 	var buf strings.Builder
@@ -2472,7 +2472,7 @@ func (m *LabelDashboardModel) DumpToFile() (string, error) {
 }
 
 // dumpWorkstreamTree recursively dumps a workstream and its sub-workstreams
-func (m *LabelDashboardModel) dumpWorkstreamTree(ws *analysis.Workstream, indent int) string {
+func (m *LensDashboardModel) dumpWorkstreamTree(ws *analysis.Workstream, indent int) string {
 	var buf strings.Builder
 	prefix := strings.Repeat("  ", indent)
 
@@ -2508,7 +2508,7 @@ func (m *LabelDashboardModel) dumpWorkstreamTree(ws *analysis.Workstream, indent
 }
 
 // dumpFlatByDepth groups issues by their depth in the tree
-func (m *LabelDashboardModel) dumpFlatByDepth() string {
+func (m *LensDashboardModel) dumpFlatByDepth() string {
 	var buf strings.Builder
 
 	// Group all issues by their depth

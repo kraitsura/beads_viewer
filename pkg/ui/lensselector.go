@@ -13,25 +13,25 @@ import (
 	"github.com/sahilm/fuzzy"
 )
 
-// LabelItem represents a selectable label or epic in the selector
-type LabelItem struct {
-	Type         string  // "label" or "epic"
-	Value        string  // label name or epic ID
-	Title        string  // display text (same as Value for labels, title for epics)
-	IssueCount   int     // total issues with this label
+// LensItem represents a selectable entry in the lens picker (label, epic, or bead)
+type LensItem struct {
+	Type         string  // "label", "epic", or "bead"
+	Value        string  // label name, epic ID, or issue ID
+	Title        string  // display text (same as Value for labels, title for epics/beads)
+	IssueCount   int     // total issues in this lens
 	ClosedCount  int     // closed issues
 	Progress     float64 // completion percentage
 	IsPinned     bool    // is this item pinned
-	OverlapCount int     // issues overlapping with scope label (when scope is set)
+	OverlapCount int     // issues overlapping with scope (when scope filter is active)
 }
 
-// LabelSelectorModel represents the label selector overlay
-type LabelSelectorModel struct {
+// LensSelectorModel represents the lens picker overlay for exploring workstreams
+type LensSelectorModel struct {
 	// Data
-	allItems      []LabelItem   // All available items (labels + epics)
-	filteredItems []LabelItem   // Filtered by search
-	pinnedItems   []LabelItem   // Pinned labels (persisted)
-	recentItems   []LabelItem   // Recently selected labels
+	allItems      []LensItem    // All available lens items (labels + epics + beads)
+	filteredItems []LensItem    // Filtered by search
+	pinnedItems   []LensItem    // Pinned lenses (persisted)
+	recentItems   []LensItem    // Recently selected lenses
 	issues        []model.Issue // Reference to issues for scope filtering
 
 	// UI State
@@ -39,7 +39,7 @@ type LabelSelectorModel struct {
 	selectedIndex  int
 	currentSection int // 0=pinned, 1=recent, 2=epics, 3=labels (or search results)
 
-	// Scope state (multi-scope)
+	// Scope state (multi-scope filtering)
 	scopeLabels []string // Currently set scope labels (empty = no scope)
 	scopeMode   bool     // True when in scope mode
 
@@ -55,22 +55,22 @@ type LabelSelectorModel struct {
 
 	// Selection result
 	confirmed    bool
-	selectedItem *LabelItem
+	selectedItem *LensItem
 	scopedLabels []string // When scope is set and item selected, both labels returned
 }
 
-// NewLabelSelectorModel creates a new label selector
-func NewLabelSelectorModel(issues []model.Issue, theme Theme) LabelSelectorModel {
-	// Create search input
+// NewLensSelectorModel creates a new lens selector for exploring workstreams
+func NewLensSelectorModel(issues []model.Issue, theme Theme) LensSelectorModel {
+	// Create search input with explorative placeholder
 	ti := textinput.New()
-	ti.Placeholder = "Search labels and epics..."
+	ti.Placeholder = "Explore workstreams..."
 	ti.Focus()
 	ti.CharLimit = 64
 	ti.Width = 40
 
 	// Collect unique label names and epics
 	labelSet := make(map[string]bool)
-	var epics []LabelItem
+	var epics []LensItem
 
 	for _, issue := range issues {
 		// Collect epics
@@ -81,7 +81,7 @@ func NewLabelSelectorModel(issues []model.Issue, theme Theme) LabelSelectorModel
 			if childTotal > 0 {
 				progress = float64(childClosed) / float64(childTotal)
 			}
-			epics = append(epics, LabelItem{
+			epics = append(epics, LensItem{
 				Type:        "epic",
 				Value:       issue.ID,
 				Title:       issue.Title,
@@ -110,14 +110,14 @@ func NewLabelSelectorModel(issues []model.Issue, theme Theme) LabelSelectorModel
 		}
 	}
 
-	var labels []LabelItem
+	var labels []LensItem
 	for name := range labelSet {
 		counts := labelCounts[name]
 		progress := 0.0
 		if counts.total > 0 {
 			progress = float64(counts.closed) / float64(counts.total)
 		}
-		labels = append(labels, LabelItem{
+		labels = append(labels, LensItem{
 			Type:        "label",
 			Value:       name,
 			Title:       name,
@@ -143,7 +143,7 @@ func NewLabelSelectorModel(issues []model.Issue, theme Theme) LabelSelectorModel
 	// Combine all items: epics first, then labels
 	allItems := append(epics, labels...)
 
-	return LabelSelectorModel{
+	return LensSelectorModel{
 		allItems:      allItems,
 		filteredItems: allItems,
 		issues:        issues,
@@ -198,7 +198,7 @@ func buildChildrenMap(issues []model.Issue) (children map[string][]string, issue
 }
 
 // SetSize updates the selector dimensions
-func (m *LabelSelectorModel) SetSize(width, height int) {
+func (m *LensSelectorModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
 	// Update text input width
@@ -213,7 +213,7 @@ func (m *LabelSelectorModel) SetSize(width, height int) {
 }
 
 // Update handles input and returns whether the model changed
-func (m *LabelSelectorModel) Update(key string) (handled bool) {
+func (m *LensSelectorModel) Update(key string) (handled bool) {
 	// Handle insert mode (all keys go to search except esc/enter)
 	if m.insertMode {
 		return m.updateInsertMode(key)
@@ -222,7 +222,7 @@ func (m *LabelSelectorModel) Update(key string) (handled bool) {
 }
 
 // updateInsertMode handles keys when in insert/search mode
-func (m *LabelSelectorModel) updateInsertMode(key string) bool {
+func (m *LensSelectorModel) updateInsertMode(key string) bool {
 	switch key {
 	case "esc":
 		// Exit insert mode, return to normal
@@ -287,7 +287,7 @@ func (m *LabelSelectorModel) updateInsertMode(key string) bool {
 }
 
 // updateNormalMode handles keys when in normal/navigation mode
-func (m *LabelSelectorModel) updateNormalMode(key string) bool {
+func (m *LensSelectorModel) updateNormalMode(key string) bool {
 	switch key {
 	case "up", "k":
 		m.moveUp()
@@ -357,24 +357,24 @@ func (m *LabelSelectorModel) updateNormalMode(key string) bool {
 }
 
 // HandleTextInput processes a text input message
-func (m *LabelSelectorModel) HandleTextInput(value string) {
+func (m *LensSelectorModel) HandleTextInput(value string) {
 	m.searchInput.SetValue(value)
 	m.filterItems()
 }
 
-func (m *LabelSelectorModel) moveUp() {
+func (m *LensSelectorModel) moveUp() {
 	if m.selectedIndex > 0 {
 		m.selectedIndex--
 	}
 }
 
-func (m *LabelSelectorModel) moveDown() {
+func (m *LensSelectorModel) moveDown() {
 	if m.selectedIndex < len(m.filteredItems)-1 {
 		m.selectedIndex++
 	}
 }
 
-func (m *LabelSelectorModel) filterItems() {
+func (m *LensSelectorModel) filterItems() {
 	query := strings.TrimSpace(m.searchInput.Value())
 
 	// Review mode: search by issue ID prefix
@@ -398,7 +398,7 @@ func (m *LabelSelectorModel) filterItems() {
 	// Fuzzy search
 	matches := fuzzy.Find(query, searchStrings)
 
-	m.filteredItems = make([]LabelItem, 0, len(matches))
+	m.filteredItems = make([]LensItem, 0, len(matches))
 	for _, match := range matches {
 		m.filteredItems = append(m.filteredItems, m.allItems[match.Index])
 	}
@@ -420,7 +420,7 @@ func (m *LabelSelectorModel) filterItems() {
 }
 
 // filterByIssueID filters by issue ID prefix or title substring match (for review mode)
-func (m *LabelSelectorModel) filterByIssueID(query string) {
+func (m *LensSelectorModel) filterByIssueID(query string) {
 	if query == "" {
 		m.filteredItems = nil
 		m.selectedIndex = 0
@@ -428,7 +428,7 @@ func (m *LabelSelectorModel) filterByIssueID(query string) {
 	}
 
 	queryLower := strings.ToLower(query)
-	var idMatches, titleMatches []LabelItem
+	var idMatches, titleMatches []LensItem
 	seen := make(map[string]bool)
 
 	for _, issue := range m.issues {
@@ -437,7 +437,7 @@ func (m *LabelSelectorModel) filterByIssueID(query string) {
 
 		// ID prefix match takes priority
 		if strings.HasPrefix(idLower, queryLower) {
-			idMatches = append(idMatches, LabelItem{
+			idMatches = append(idMatches, LensItem{
 				Type:       "bead",
 				Value:      issue.ID,
 				Title:      issue.Title,
@@ -446,7 +446,7 @@ func (m *LabelSelectorModel) filterByIssueID(query string) {
 			seen[issue.ID] = true
 		} else if strings.Contains(titleLower, queryLower) {
 			// Title substring match (only if not already matched by ID)
-			titleMatches = append(titleMatches, LabelItem{
+			titleMatches = append(titleMatches, LensItem{
 				Type:       "bead",
 				Value:      issue.ID,
 				Title:      issue.Title,
@@ -472,37 +472,37 @@ func (m *LabelSelectorModel) filterByIssueID(query string) {
 }
 
 // IsConfirmed returns true if user confirmed a selection
-func (m *LabelSelectorModel) IsConfirmed() bool {
+func (m *LensSelectorModel) IsConfirmed() bool {
 	return m.confirmed
 }
 
 // IsCancelled returns true if user cancelled the selector
-func (m *LabelSelectorModel) IsCancelled() bool {
+func (m *LensSelectorModel) IsCancelled() bool {
 	return m.selectedItem == nil && !m.confirmed
 }
 
-// SelectedItem returns the selected label item, or nil if none
-func (m *LabelSelectorModel) SelectedItem() *LabelItem {
+// SelectedItem returns the selected lens item, or nil if none
+func (m *LensSelectorModel) SelectedItem() *LensItem {
 	return m.selectedItem
 }
 
 // ScopedLabels returns the scoped labels when scope mode is active
-func (m *LabelSelectorModel) ScopedLabels() []string {
+func (m *LensSelectorModel) ScopedLabels() []string {
 	return m.scopedLabels
 }
 
 // ScopeLabels returns all current scope labels
-func (m *LabelSelectorModel) ScopeLabels() []string {
+func (m *LensSelectorModel) ScopeLabels() []string {
 	return m.scopeLabels
 }
 
 // IsScopeMode returns true if scope mode is active
-func (m *LabelSelectorModel) IsScopeMode() bool {
+func (m *LensSelectorModel) IsScopeMode() bool {
 	return m.scopeMode
 }
 
 // addToScope adds a label to the scope set (no toggle, just add if not present)
-func (m *LabelSelectorModel) addToScope(label string) {
+func (m *LensSelectorModel) addToScope(label string) {
 	// Check if already in scope
 	for _, l := range m.scopeLabels {
 		if l == label {
@@ -519,7 +519,7 @@ func (m *LabelSelectorModel) addToScope(label string) {
 }
 
 // toggleScope toggles a label in/out of the scope set
-func (m *LabelSelectorModel) toggleScope(label string) {
+func (m *LensSelectorModel) toggleScope(label string) {
 	// Check if already in scope
 	idx := -1
 	for i, l := range m.scopeLabels {
@@ -551,7 +551,7 @@ func (m *LabelSelectorModel) toggleScope(label string) {
 }
 
 // clearScope clears all scopes and resets to full list
-func (m *LabelSelectorModel) clearScope() {
+func (m *LensSelectorModel) clearScope() {
 	m.scopeLabels = nil
 	m.scopeMode = false
 	m.scopedLabels = nil
@@ -561,7 +561,7 @@ func (m *LabelSelectorModel) clearScope() {
 }
 
 // filterByScope filters to show only labels that co-occur with ALL scope labels
-func (m *LabelSelectorModel) filterByScope() {
+func (m *LensSelectorModel) filterByScope() {
 	if len(m.scopeLabels) == 0 {
 		m.filteredItems = m.allItems
 		return
@@ -609,7 +609,7 @@ func (m *LabelSelectorModel) filterByScope() {
 	}
 
 	// Build filtered items with overlap counts
-	var filtered []LabelItem
+	var filtered []LensItem
 	for _, item := range m.allItems {
 		if item.Type == "label" && !scopeSet[item.Value] {
 			if overlap, ok := labelOverlap[item.Value]; ok && overlap > 0 {
@@ -630,7 +630,7 @@ func (m *LabelSelectorModel) filterByScope() {
 }
 
 // Reset clears the selection state for reuse
-func (m *LabelSelectorModel) Reset() {
+func (m *LensSelectorModel) Reset() {
 	m.confirmed = false
 	m.selectedItem = nil
 	m.scopedLabels = nil
@@ -645,22 +645,22 @@ func (m *LabelSelectorModel) Reset() {
 }
 
 // IsReviewMode returns true if in review/ID search mode
-func (m *LabelSelectorModel) IsReviewMode() bool {
+func (m *LensSelectorModel) IsReviewMode() bool {
 	return m.reviewMode
 }
 
 // IsInsertMode returns true if in insert/search mode
-func (m *LabelSelectorModel) IsInsertMode() bool {
+func (m *LensSelectorModel) IsInsertMode() bool {
 	return m.insertMode
 }
 
 // IsScopeAddMode returns true if in scope-adding insert mode
-func (m *LabelSelectorModel) IsScopeAddMode() bool {
+func (m *LensSelectorModel) IsScopeAddMode() bool {
 	return m.scopeAddMode
 }
 
-// View renders the label selector overlay
-func (m *LabelSelectorModel) View() string {
+// View renders the lens selector overlay with explorative theme
+func (m *LensSelectorModel) View() string {
 	t := m.theme
 
 	// Calculate box dimensions
@@ -682,9 +682,9 @@ func (m *LabelSelectorModel) View() string {
 		Bold(true)
 
 	if m.scopeMode {
-		lines = append(lines, titleStyle.Render("Select Label (within scope)"))
+		lines = append(lines, titleStyle.Render("🔭 Explore (filtered view)"))
 	} else {
-		lines = append(lines, titleStyle.Render("Select Label or Epic"))
+		lines = append(lines, titleStyle.Render("🔭 Explore Workstreams"))
 	}
 
 	// Scope indicator - sleek inline chips
@@ -741,10 +741,10 @@ func (m *LabelSelectorModel) View() string {
 	// Render items by section
 	if len(m.filteredItems) == 0 {
 		emptyStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Italic(true)
-		lines = append(lines, emptyStyle.Render("  No matching labels or epics"))
+		lines = append(lines, emptyStyle.Render("  No matching workstreams found"))
 	} else {
 		// Group items by type for display
-		var beads, epics, labels []LabelItem
+		var beads, epics, labels []LensItem
 		for _, item := range m.filteredItems {
 			switch item.Type {
 			case "bead":
@@ -764,7 +764,7 @@ func (m *LabelSelectorModel) View() string {
 			sectionStyle := t.Renderer.NewStyle().
 				Foreground(t.Secondary).
 				Bold(true)
-			lines = append(lines, sectionStyle.Render("ISSUES"))
+			lines = append(lines, sectionStyle.Render("◇ BEADS"))
 
 			for _, item := range beads {
 				if globalIdx >= maxVisible {
@@ -782,7 +782,7 @@ func (m *LabelSelectorModel) View() string {
 			sectionStyle := t.Renderer.NewStyle().
 				Foreground(t.Secondary).
 				Bold(true)
-			lines = append(lines, sectionStyle.Render("EPICS"))
+			lines = append(lines, sectionStyle.Render("◈ EPICS"))
 
 			for _, item := range epics {
 				if globalIdx >= maxVisible {
@@ -801,9 +801,9 @@ func (m *LabelSelectorModel) View() string {
 				Foreground(t.Secondary).
 				Bold(true)
 			if m.scopeMode {
-				lines = append(lines, sectionStyle.Render("MATCHING LABELS (within scope)"))
+				lines = append(lines, sectionStyle.Render("◎ LABELS (in scope)"))
 			} else {
-				lines = append(lines, sectionStyle.Render("LABELS"))
+				lines = append(lines, sectionStyle.Render("◎ LABELS"))
 			}
 
 			for _, item := range labels {
@@ -837,23 +837,23 @@ func (m *LabelSelectorModel) View() string {
 	if m.insertMode {
 		// Insert mode footer - different hint for scope adding vs searching vs review
 		if m.scopeAddMode {
-			modeIndicator := modeStyle.Render("SCOPE+")
-			lines = append(lines, modeIndicator+" "+footerStyle.Render("type to filter • ↑↓: nav • enter: add scope • esc: cancel"))
+			modeIndicator := modeStyle.Render("FILTER+")
+			lines = append(lines, modeIndicator+" "+footerStyle.Render("type to filter • ↑↓: nav • enter: add filter • esc: cancel"))
 		} else if m.reviewMode {
-			modeIndicator := modeStyle.Render("REVIEW")
-			lines = append(lines, modeIndicator+" "+footerStyle.Render("type ID or title • ↑↓: nav • enter: view bead • esc: cancel"))
+			modeIndicator := modeStyle.Render("LOOKUP")
+			lines = append(lines, modeIndicator+" "+footerStyle.Render("type ID or title • ↑↓: nav • enter: explore bead • esc: cancel"))
 		} else {
 			modeIndicator := modeStyle.Render("SEARCH")
-			lines = append(lines, modeIndicator+" "+footerStyle.Render("type to filter • ↑↓: nav • enter: select • esc: cancel"))
+			lines = append(lines, modeIndicator+" "+footerStyle.Render("type to search • ↑↓: nav • enter: explore • esc: cancel"))
 		}
 	} else if m.scopeMode {
 		// Scope mode footer (normal mode with scopes set)
-		modeIndicator := modeStyle.Render("SCOPE")
-		lines = append(lines, modeIndicator+" "+footerStyle.Render("j/k: nav • s: +scope • ⌫: -scope • enter: select • esc: clear • q: close"))
+		modeIndicator := modeStyle.Render("FILTERED")
+		lines = append(lines, modeIndicator+" "+footerStyle.Render("j/k: nav • s: +filter • ⌫: -filter • enter: explore • esc: clear • q: close"))
 	} else {
 		// Normal mode footer
-		modeIndicator := modeStyle.Render("NORMAL")
-		lines = append(lines, modeIndicator+" "+footerStyle.Render("j/k: nav • i: search • r: ID lookup • s: +scope • enter: select • q: close"))
+		modeIndicator := modeStyle.Render("BROWSE")
+		lines = append(lines, modeIndicator+" "+footerStyle.Render("j/k: nav • i: search • r: lookup • s: +filter • enter: explore • q: close"))
 	}
 
 	content := strings.Join(lines, "\n")
@@ -877,7 +877,7 @@ func (m *LabelSelectorModel) View() string {
 	)
 }
 
-func (m *LabelSelectorModel) renderItem(item LabelItem, isSelected bool, maxWidth int) string {
+func (m *LensSelectorModel) renderItem(item LensItem, isSelected bool, maxWidth int) string {
 	t := m.theme
 
 	// Prefix based on selection and type
@@ -945,7 +945,7 @@ func (m *LabelSelectorModel) renderItem(item LabelItem, isSelected bool, maxWidt
 	return nameStyle.Render(name) + strings.Repeat(" ", padding) + suffix
 }
 
-func (m *LabelSelectorModel) renderProgressBar(progress float64, closed, total int) string {
+func (m *LensSelectorModel) renderProgressBar(progress float64, closed, total int) string {
 	t := m.theme
 
 	if total == 0 {
@@ -984,11 +984,11 @@ func (m *LabelSelectorModel) renderProgressBar(progress float64, closed, total i
 }
 
 // SearchValue returns the current search input value
-func (m *LabelSelectorModel) SearchValue() string {
+func (m *LensSelectorModel) SearchValue() string {
 	return m.searchInput.Value()
 }
 
 // ItemCount returns the number of filtered items
-func (m *LabelSelectorModel) ItemCount() int {
+func (m *LensSelectorModel) ItemCount() int {
 	return len(m.filteredItems)
 }

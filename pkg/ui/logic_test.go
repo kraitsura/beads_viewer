@@ -186,7 +186,7 @@ func TestFormatTimeRel(t *testing.T) {
 	}
 }
 
-func TestLabelDashboardToggleViewType(t *testing.T) {
+func TestLensDashboardToggleViewType(t *testing.T) {
 	// Create test issues with a label and dependencies to form multiple workstreams
 	issues := []model.Issue{
 		{ID: "A", Status: model.StatusOpen, Labels: []string{"test-label"}},
@@ -203,7 +203,7 @@ func TestLabelDashboardToggleViewType(t *testing.T) {
 
 	renderer := lipgloss.DefaultRenderer()
 	theme := DefaultTheme(renderer)
-	dashboard := NewLabelDashboardModel("test-label", issues, issueMap, theme)
+	dashboard := NewLensDashboardModel("test-label", issues, issueMap, theme)
 
 	// Initial state should be flat view
 	if dashboard.GetViewType() != ViewTypeFlat {
@@ -234,7 +234,7 @@ func TestLabelDashboardToggleViewType(t *testing.T) {
 	}
 }
 
-func TestLabelDashboardToggleViewTypeViaModel(t *testing.T) {
+func TestLensDashboardToggleViewTypeViaModel(t *testing.T) {
 	// Create test issues with a label
 	issues := []model.Issue{
 		{ID: "A", Status: model.StatusOpen, Labels: []string{"test-label"}},
@@ -249,25 +249,25 @@ func TestLabelDashboardToggleViewTypeViaModel(t *testing.T) {
 		issueMap[issues[i].ID] = &issues[i]
 	}
 	m.issueMap = issueMap
-	dashboard := NewLabelDashboardModel("test-label", issues, issueMap, m.theme)
-	m.labelDashboard = dashboard
-	m.showLabelDashboard = true
-	m.focused = focusLabelDashboard
+	dashboard := NewLensDashboardModel("test-label", issues, issueMap, m.theme)
+	m.lensDashboard = dashboard
+	m.showLensDashboard = true
+	m.focused = focusLensDashboard
 
 	// Verify initial state
-	if m.labelDashboard.GetViewType() != ViewTypeFlat {
-		t.Errorf("Initial viewType should be ViewTypeFlat, got %v", m.labelDashboard.GetViewType())
+	if m.lensDashboard.GetViewType() != ViewTypeFlat {
+		t.Errorf("Initial viewType should be ViewTypeFlat, got %v", m.lensDashboard.GetViewType())
 	}
 
-	// Simulate 'w' key press through handleLabelDashboardKeys
-	// Note: handleLabelDashboardKeys returns a new Model (value semantics)
-	m = m.handleLabelDashboardKeys(keyMsg("w"))
+	// Simulate 'w' key press through handleLensDashboardKeys
+	// Note: handleLensDashboardKeys returns a new Model (value semantics)
+	m = m.handleLensDashboardKeys(keyMsg("w"))
 
 	// The critical test: did the viewType change persist?
-	if m.labelDashboard.GetViewType() != ViewTypeWorkstream {
-		t.Errorf("After 'w' key, viewType should be ViewTypeWorkstream, got %v", m.labelDashboard.GetViewType())
+	if m.lensDashboard.GetViewType() != ViewTypeWorkstream {
+		t.Errorf("After 'w' key, viewType should be ViewTypeWorkstream, got %v", m.lensDashboard.GetViewType())
 	}
-	if !m.labelDashboard.IsWorkstreamView() {
+	if !m.lensDashboard.IsWorkstreamView() {
 		t.Error("IsWorkstreamView() should return true after 'w' key")
 	}
 
@@ -277,17 +277,17 @@ func TestLabelDashboardToggleViewTypeViaModel(t *testing.T) {
 	}
 
 	// Toggle back
-	m = m.handleLabelDashboardKeys(keyMsg("w"))
+	m = m.handleLensDashboardKeys(keyMsg("w"))
 
-	if m.labelDashboard.GetViewType() != ViewTypeFlat {
-		t.Errorf("After second 'w' key, viewType should be ViewTypeFlat, got %v", m.labelDashboard.GetViewType())
+	if m.lensDashboard.GetViewType() != ViewTypeFlat {
+		t.Errorf("After second 'w' key, viewType should be ViewTypeFlat, got %v", m.lensDashboard.GetViewType())
 	}
 	if !strings.Contains(m.statusMsg, "Switched to flat view") {
 		t.Errorf("Expected statusMsg to contain 'Switched to flat view', got '%s'", m.statusMsg)
 	}
 }
 
-func TestLabelDashboardViewOutputChanges(t *testing.T) {
+func TestLensDashboardViewOutputChanges(t *testing.T) {
 	// Create test issues with dependencies to form 2 workstreams
 	// Workstream 1: A -> B (A blocks B)
 	// Workstream 2: C (standalone)
@@ -306,7 +306,7 @@ func TestLabelDashboardViewOutputChanges(t *testing.T) {
 
 	renderer := lipgloss.DefaultRenderer()
 	theme := DefaultTheme(renderer)
-	dashboard := NewLabelDashboardModel("test-label", issues, issueMap, theme)
+	dashboard := NewLensDashboardModel("test-label", issues, issueMap, theme)
 	dashboard.SetSize(80, 40)
 
 	// Check workstream count
@@ -315,7 +315,7 @@ func TestLabelDashboardViewOutputChanges(t *testing.T) {
 
 	// Get View output in flat mode
 	flatView := dashboard.View()
-	t.Logf("Flat view contains '[flat]': %v", strings.Contains(flatView, "[flat]"))
+	t.Logf("Flat view contains '[flat view]': %v", strings.Contains(flatView, "[flat view]"))
 
 	// Toggle to workstream view
 	dashboard.ToggleViewType()
@@ -325,11 +325,11 @@ func TestLabelDashboardViewOutputChanges(t *testing.T) {
 
 	// If there are multiple workstreams, the view should show workstream info
 	if wsCount > 1 {
-		if !strings.Contains(workstreamView, "workstreams:") {
-			t.Errorf("With %d workstreams and ViewTypeWorkstream, view should show 'workstreams:', got:\n%s", wsCount, workstreamView)
+		if !strings.Contains(workstreamView, "streams]") {
+			t.Errorf("With %d workstreams and ViewTypeWorkstream, view should show 'streams]', got:\n%s", wsCount, workstreamView)
 		}
-		if strings.Contains(workstreamView, "[flat]") {
-			t.Errorf("In workstream mode with multiple workstreams, should not show '[flat]', got:\n%s", workstreamView)
+		if strings.Contains(workstreamView, "[flat view]") {
+			t.Errorf("In workstream mode with multiple workstreams, should not show '[flat view]', got:\n%s", workstreamView)
 		}
 	} else {
 		// With <= 1 workstream, even workstream mode shows as flat (by design)
@@ -337,7 +337,7 @@ func TestLabelDashboardViewOutputChanges(t *testing.T) {
 	}
 }
 
-func TestLabelDashboardUpstreamContextBlockers(t *testing.T) {
+func TestLensDashboardUpstreamContextBlockers(t *testing.T) {
 	// Test that flat view includes context issues that block primaries (upstream blockers)
 	// This should match the behavior of workstream view
 	//
@@ -367,7 +367,7 @@ func TestLabelDashboardUpstreamContextBlockers(t *testing.T) {
 
 	renderer := lipgloss.DefaultRenderer()
 	theme := DefaultTheme(renderer)
-	dashboard := NewLabelDashboardModel("test-label", issues, issueMap, theme)
+	dashboard := NewLensDashboardModel("test-label", issues, issueMap, theme)
 	dashboard.SetSize(80, 40)
 
 	// At default Depth2, flat view should now include upstream context blockers
@@ -419,7 +419,7 @@ func TestLabelDashboardUpstreamContextBlockers(t *testing.T) {
 	}
 }
 
-func TestLabelDashboardToggleViaFullUpdateCycle(t *testing.T) {
+func TestLensDashboardToggleViaFullUpdateCycle(t *testing.T) {
 	// Test the full Update() -> View() cycle to catch any issues with value semantics
 	issues := []model.Issue{
 		{ID: "A", Status: model.StatusOpen, Labels: []string{"test-label", "ws1"}},
@@ -438,20 +438,20 @@ func TestLabelDashboardToggleViaFullUpdateCycle(t *testing.T) {
 		issueMap[issues[i].ID] = &issues[i]
 	}
 	m.issueMap = issueMap
-	dashboard2 := NewLabelDashboardModel("test-label", issues, issueMap, m.theme)
-	m.labelDashboard = dashboard2
-	m.labelDashboard.SetSize(80, 40)
-	m.showLabelDashboard = true
-	m.focused = focusLabelDashboard
+	dashboard2 := NewLensDashboardModel("test-label", issues, issueMap, m.theme)
+	m.lensDashboard = dashboard2
+	m.lensDashboard.SetSize(80, 40)
+	m.showLensDashboard = true
+	m.focused = focusLensDashboard
 
 	// Verify initial flat view
 	flatView := m.View()
-	if !strings.Contains(flatView, "[flat]") {
-		t.Errorf("Initial view should contain '[flat]', got:\n%s", flatView)
+	if !strings.Contains(flatView, "[flat view]") {
+		t.Errorf("Initial view should contain '[flat view]', got:\n%s", flatView)
 	}
-	// Flat view footer should suggest "w: workstreams"
-	if !strings.Contains(flatView, "w: workstreams") {
-		t.Errorf("Initial flat view footer should suggest 'w: workstreams', got:\n%s", flatView)
+	// Flat view footer should suggest "w: streams"
+	if !strings.Contains(flatView, "w: streams") {
+		t.Errorf("Initial flat view footer should suggest 'w: streams', got:\n%s", flatView)
 	}
 
 	// Send 'w' key through Update()
@@ -459,25 +459,25 @@ func TestLabelDashboardToggleViaFullUpdateCycle(t *testing.T) {
 	m = updatedAny.(Model)
 
 	// Verify view type changed
-	if !m.labelDashboard.IsWorkstreamView() {
+	if !m.lensDashboard.IsWorkstreamView() {
 		t.Error("After 'w' key via Update(), should be in workstream view")
 	}
 
 	// Check View() output
 	workstreamView := m.View()
-	wsCount := m.labelDashboard.WorkstreamCount()
+	wsCount := m.lensDashboard.WorkstreamCount()
 	t.Logf("Workstream count: %d", wsCount)
 
 	if wsCount > 1 {
-		if !strings.Contains(workstreamView, "workstreams:") {
-			t.Errorf("After toggle via Update(), view should contain 'workstreams:', got:\n%s", workstreamView)
+		if !strings.Contains(workstreamView, "streams]") {
+			t.Errorf("After toggle via Update(), view should contain 'streams]', got:\n%s", workstreamView)
 		}
-		if strings.Contains(workstreamView, "[flat]") {
-			t.Errorf("After toggle via Update(), view should NOT contain '[flat]', got:\n%s", workstreamView)
+		if strings.Contains(workstreamView, "[flat view]") {
+			t.Errorf("After toggle via Update(), view should NOT contain '[flat view]', got:\n%s", workstreamView)
 		}
-		// Workstream view footer should suggest "w: flat view"
-		if !strings.Contains(workstreamView, "w: flat view") {
-			t.Errorf("Workstream view footer should suggest 'w: flat view', got:\n%s", workstreamView)
+		// Workstream view footer should suggest "w: flat"
+		if !strings.Contains(workstreamView, "w: flat") {
+			t.Errorf("Workstream view footer should suggest 'w: flat', got:\n%s", workstreamView)
 		}
 	}
 
@@ -485,13 +485,13 @@ func TestLabelDashboardToggleViaFullUpdateCycle(t *testing.T) {
 	updatedAny, _ = m.Update(keyMsg("w"))
 	m = updatedAny.(Model)
 
-	if m.labelDashboard.IsWorkstreamView() {
+	if m.lensDashboard.IsWorkstreamView() {
 		t.Error("After second 'w' key, should be back in flat view")
 	}
 
 	backToFlatView := m.View()
-	if !strings.Contains(backToFlatView, "[flat]") {
-		t.Errorf("After toggling back, view should contain '[flat]', got:\n%s", backToFlatView)
+	if !strings.Contains(backToFlatView, "[flat view]") {
+		t.Errorf("After toggling back, view should contain '[flat view]', got:\n%s", backToFlatView)
 	}
 }
 
@@ -529,7 +529,7 @@ func TestEpicDashboardDepthBehavior(t *testing.T) {
 
 	renderer := lipgloss.DefaultRenderer()
 	theme := DefaultTheme(renderer)
-	dashboard := NewEpicDashboardModel("epic", "Test Epic", issues, issueMap, theme)
+	dashboard := NewEpicLensModel("epic", "Test Epic", issues, issueMap, theme)
 	dashboard.SetSize(80, 40)
 
 	// Default is Depth2
@@ -576,7 +576,7 @@ func TestEpicDashboardDepthBehavior(t *testing.T) {
 	}
 }
 
-func TestLabelDashboardDepthBehavior(t *testing.T) {
+func TestLensDashboardDepthBehavior(t *testing.T) {
 	// Test that label mode depth works correctly:
 	// - Depth1: only issues with the label directly applied (flat list)
 	// - Depth2: tree with 2 levels (root + children)
@@ -604,7 +604,7 @@ func TestLabelDashboardDepthBehavior(t *testing.T) {
 
 	renderer := lipgloss.DefaultRenderer()
 	theme := DefaultTheme(renderer)
-	dashboard := NewLabelDashboardModel("test-label", issues, issueMap, theme)
+	dashboard := NewLensDashboardModel("test-label", issues, issueMap, theme)
 	dashboard.SetSize(80, 40)
 
 	// Default is Depth2 - tree shows 2 levels (parent + child)
@@ -652,7 +652,7 @@ func TestLabelDashboardDepthBehavior(t *testing.T) {
 	}
 }
 
-func TestLabelSelectorDirectCountsOnly(t *testing.T) {
+func TestLensSelectorDirectCountsOnly(t *testing.T) {
 	// Setup: parent has label, children do NOT have label
 	// Label selector should count ONLY directly labeled issues (not descendants)
 	//
@@ -671,34 +671,34 @@ func TestLabelSelectorDirectCountsOnly(t *testing.T) {
 
 	renderer := lipgloss.DefaultRenderer()
 	theme := DefaultTheme(renderer)
-	selector := NewLabelSelectorModel(issues, theme)
+	selector := NewLensSelectorModel(issues, theme)
 
 	// Find the "test" label item
-	var testLabelItem *LabelItem
+	var testLensItem *LensItem
 	for i := range selector.allItems {
 		if selector.allItems[i].Type == "label" && selector.allItems[i].Value == "test" {
-			testLabelItem = &selector.allItems[i]
+			testLensItem = &selector.allItems[i]
 			break
 		}
 	}
 
-	if testLabelItem == nil {
+	if testLensItem == nil {
 		t.Fatal("Expected to find 'test' label in selector")
 	}
 
 	// Should count ONLY direct: parent (1 issue with "test" label)
-	if testLabelItem.IssueCount != 1 {
-		t.Errorf("Expected IssueCount=1 (only direct), got %d", testLabelItem.IssueCount)
+	if testLensItem.IssueCount != 1 {
+		t.Errorf("Expected IssueCount=1 (only direct), got %d", testLensItem.IssueCount)
 	}
 
 	// Closed should be 0 (parent is open, children don't have label)
-	if testLabelItem.ClosedCount != 0 {
-		t.Errorf("Expected ClosedCount=0, got %d", testLabelItem.ClosedCount)
+	if testLensItem.ClosedCount != 0 {
+		t.Errorf("Expected ClosedCount=0, got %d", testLensItem.ClosedCount)
 	}
 
 	// Progress should be 0/1 = 0
-	if testLabelItem.Progress != 0.0 {
-		t.Errorf("Expected Progress=0, got %.3f", testLabelItem.Progress)
+	if testLensItem.Progress != 0.0 {
+		t.Errorf("Expected Progress=0, got %.3f", testLensItem.Progress)
 	}
 }
 
@@ -719,10 +719,10 @@ func TestEpicSelectorCountsDescendants(t *testing.T) {
 
 	renderer := lipgloss.DefaultRenderer()
 	theme := DefaultTheme(renderer)
-	selector := NewLabelSelectorModel(issues, theme)
+	selector := NewLensSelectorModel(issues, theme)
 
 	// Find the epic item
-	var epicItem *LabelItem
+	var epicItem *LensItem
 	for i := range selector.allItems {
 		if selector.allItems[i].Type == "epic" && selector.allItems[i].Value == "epic" {
 			epicItem = &selector.allItems[i]
@@ -791,7 +791,7 @@ func TestCrossEpicContextBlockerIsolation(t *testing.T) {
 	theme := DefaultTheme(renderer)
 
 	// View Epic1 dashboard
-	dashboard := NewEpicDashboardModel("epic1", "Auth Epic", issues, issueMap, theme)
+	dashboard := NewEpicLensModel("epic1", "Auth Epic", issues, issueMap, theme)
 	dashboard.SetSize(80, 40)
 
 	total := dashboard.IssueCount()
