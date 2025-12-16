@@ -4,7 +4,6 @@ package drift
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -437,19 +436,40 @@ func (c *Calculator) checkBlockingCascade(result *Result) {
 }
 
 // cycleKey creates a normalized key for a cycle for comparison.
-// Note: This uses sorted elements which works when cycle detection algorithms
-// produce consistent starting points. If cycles could start at different nodes
-// (e.g., [A,B,C,A] vs [B,C,A,B]), a more sophisticated normalization would be
-// needed (e.g., canonical rotation to smallest element first).
+// It rotates the cycle so the lexicographically smallest element is first,
+// preserving the order (direction) of elements.
+// Handles cycles represented as [A, B, C, A] by treating the repeated end as implicit.
 func cycleKey(cycle []string) string {
 	if len(cycle) == 0 {
 		return ""
 	}
-	// Sort to normalize - assumes cycle detection produces consistent representations
-	sorted := make([]string, len(cycle))
-	copy(sorted, cycle)
-	sort.Strings(sorted)
-	return strings.Join(sorted, "|")
+
+	// Work with the unique sequence of nodes (exclude repeated end)
+	unique := cycle
+	if len(cycle) > 1 && cycle[0] == cycle[len(cycle)-1] {
+		unique = cycle[:len(cycle)-1]
+	}
+
+	if len(unique) == 0 {
+		return ""
+	}
+
+	// Find index of smallest element
+	minIdx := 0
+	minVal := unique[0]
+	for i, val := range unique {
+		if val < minVal {
+			minVal = val
+			minIdx = i
+		}
+	}
+
+	// Rotate so min element is first
+	rotated := make([]string, len(unique))
+	copy(rotated, unique[minIdx:])
+	copy(rotated[len(unique)-minIdx:], unique[:minIdx])
+
+	return strings.Join(rotated, "|")
 }
 
 // Summary returns a human-readable summary of drift results
