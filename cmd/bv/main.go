@@ -41,6 +41,7 @@ func main() {
 	robotNext := flag.Bool("robot-next", false, "Output only the top pick recommendation as JSON (minimal triage)")
 	robotDiff := flag.Bool("robot-diff", false, "Output diff as JSON (use with --diff-since)")
 	robotRecipes := flag.Bool("robot-recipes", false, "Output available recipes as JSON for AI agents")
+	robotLabelHealth := flag.Bool("robot-label-health", false, "Output label health metrics as JSON for AI agents")
 	robotAlerts := flag.Bool("robot-alerts", false, "Output alerts (drift + proactive) as JSON for AI agents")
 	// Robot output filters (bv-84)
 	robotMinConf := flag.Float64("robot-min-confidence", 0.0, "Filter robot outputs by minimum confidence (0.0-1.0)")
@@ -191,6 +192,11 @@ func main() {
 		fmt.Println("      Lists all available recipes as JSON.")
 		fmt.Println("      Output: {recipes: [{name, description, source}]}")
 		fmt.Println("      Sources: 'builtin', 'user' (~/.config/bv/recipes.yaml), 'project' (.bv/recipes.yaml)")
+		fmt.Println("")
+		fmt.Println("  --robot-label-health")
+		fmt.Println("      Outputs label health metrics as JSON (velocity, freshness, flow, criticality).")
+		fmt.Println("      Includes label summaries, detailed metrics, and cross-label dependencies.")
+		fmt.Println("      Key fields: health_level (healthy|warning|critical), velocity_score, flow_score.")
 		fmt.Println("")
 		fmt.Println("  --robot-alerts")
 		fmt.Println("      Outputs drift + proactive alerts as JSON (staleness, cascades, density, cycles).")
@@ -389,6 +395,38 @@ func main() {
 
 	// Stable data hash for robot outputs (after repo filter but before recipes/TUI)
 	dataHash := analysis.ComputeDataHash(issues)
+
+	// Handle --robot-label-health
+	if *robotLabelHealth {
+		cfg := analysis.DefaultLabelHealthConfig()
+		results := analysis.ComputeAllLabelHealth(issues, cfg, time.Now().UTC())
+
+		output := struct {
+			GeneratedAt    string                       `json:"generated_at"`
+			DataHash       string                       `json:"data_hash"`
+			AnalysisConfig analysis.LabelHealthConfig   `json:"analysis_config"`
+			Results        analysis.LabelAnalysisResult `json:"results"`
+			UsageHints     []string                     `json:"usage_hints"`
+		}{
+			GeneratedAt:    time.Now().UTC().Format(time.RFC3339),
+			DataHash:       dataHash,
+			AnalysisConfig: cfg,
+			Results:        results,
+			UsageHints: []string{
+				"jq '.results.summaries | sort_by(.health) | .[:3]' - Critical labels",
+				"jq '.results.labels[] | select(.health_level == \"critical\")' - Critical details",
+				"jq '.results.cross_label_flow.bottleneck_labels' - Bottleneck labels",
+				"jq '.results.attention_needed' - Labels needing attention",
+			},
+		}
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(output); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding label health: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// Handle --robot-alerts (drift + proactive)
 	if *robotAlerts {
