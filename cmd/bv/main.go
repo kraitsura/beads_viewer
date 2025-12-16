@@ -102,6 +102,8 @@ func main() {
 	robotCapacity := flag.Bool("robot-capacity", false, "Output capacity simulation and completion projection as JSON")
 	capacityAgents := flag.Int("agents", 1, "Number of parallel agents for capacity simulation")
 	capacityLabel := flag.String("capacity-label", "", "Filter capacity simulation by label")
+	// Burndown flags (bv-159)
+	robotBurndown := flag.String("robot-burndown", "", "Output burndown data for sprint ID, or 'current' for active sprint")
 	// Static pages export flags (bv-73f)
 	exportPages := flag.String("export-pages", "", "Export static site to directory (e.g., ./bv-pages)")
 	pagesTitle := flag.String("pages-title", "", "Custom title for static site")
@@ -218,6 +220,20 @@ func main() {
 		fmt.Println("      Outputs details for a specific sprint as JSON.")
 		fmt.Println("      Returns the full sprint object with all fields.")
 		fmt.Println("      Example: bv --robot-sprint-show sprint-1")
+		fmt.Println("")
+		fmt.Println("  --robot-burndown <id|current>")
+		fmt.Println("      Outputs burndown data for a sprint as JSON.")
+		fmt.Println("      Use 'current' to get the active sprint, or specify sprint ID.")
+		fmt.Println("      Key fields:")
+		fmt.Println("      - total_days, elapsed_days, remaining_days")
+		fmt.Println("      - total_issues, completed_issues, remaining_issues")
+		fmt.Println("      - ideal_burn_rate, actual_burn_rate")
+		fmt.Println("      - projected_complete: Estimated completion date")
+		fmt.Println("      - on_track: Whether sprint will complete on time")
+		fmt.Println("      - daily_points: Actual burndown data points")
+		fmt.Println("      - ideal_line: Expected burndown line")
+		fmt.Println("      Example: bv --robot-burndown current")
+		fmt.Println("      Example: bv --robot-burndown sprint-1")
 		fmt.Println("")
 		fmt.Println("  --robot-forecast <id|all>")
 		fmt.Println("      Outputs ETA forecast for a specific bead or all open issues.")
@@ -1823,6 +1839,60 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error encoding sprints: %v\n", err)
 				os.Exit(1)
 			}
+		}
+		os.Exit(0)
+	}
+
+	// Handle --robot-burndown flag (bv-159)
+	if *robotBurndown != "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
+			os.Exit(1)
+		}
+
+		sprints, err := loader.LoadSprints(cwd)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading sprints: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Find the target sprint
+		var targetSprint *model.Sprint
+		if *robotBurndown == "current" {
+			// Find active sprint
+			for i := range sprints {
+				if sprints[i].IsActive() {
+					targetSprint = &sprints[i]
+					break
+				}
+			}
+			if targetSprint == nil {
+				fmt.Fprintf(os.Stderr, "No active sprint found\n")
+				os.Exit(1)
+			}
+		} else {
+			// Find sprint by ID
+			for i := range sprints {
+				if sprints[i].ID == *robotBurndown {
+					targetSprint = &sprints[i]
+					break
+				}
+			}
+			if targetSprint == nil {
+				fmt.Fprintf(os.Stderr, "Sprint not found: %s\n", *robotBurndown)
+				os.Exit(1)
+			}
+		}
+
+		// Build burndown data
+		burndown := calculateBurndown(targetSprint, issues)
+
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(burndown); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding burndown: %v\n", err)
+			os.Exit(1)
 		}
 		os.Exit(0)
 	}
@@ -3482,4 +3552,191 @@ func runPagesWizard(issues []model.Issue, beadsPath string) error {
 	export.SaveWizardConfig(config)
 
 	return nil
+}
+
+// BurndownOutput represents the JSON output for --robot-burndown (bv-159)
+type BurndownOutput struct {
+	GeneratedAt       time.Time           `json:"generated_at"`
+	SprintID          string              `json:"sprint_id"`
+	SprintName        string              `json:"sprint_name"`
+	StartDate         time.Time           `json:"start_date"`
+	EndDate           time.Time           `json:"end_date"`
+	TotalDays         int                 `json:"total_days"`
+	ElapsedDays       int                 `json:"elapsed_days"`
+	RemainingDays     int                 `json:"remaining_days"`
+	TotalIssues       int                 `json:"total_issues"`
+	CompletedIssues   int                 `json:"completed_issues"`
+	RemainingIssues   int                 `json:"remaining_issues"`
+	IdealBurnRate     float64             `json:"ideal_burn_rate"`
+	ActualBurnRate    float64             `json:"actual_burn_rate"`
+	ProjectedComplete *time.Time          `json:"projected_complete,omitempty"`
+	OnTrack           bool                `json:"on_track"`
+	DailyPoints       []model.BurndownPoint `json:"daily_points"`
+	IdealLine         []model.BurndownPoint `json:"ideal_line"`
+	ScopeChanges      []ScopeChangeEvent  `json:"scope_changes,omitempty"`
+}
+
+// ScopeChangeEvent represents when issues were added/removed from sprint
+type ScopeChangeEvent struct {
+	Date      time.Time `json:"date"`
+	IssueID   string    `json:"issue_id"`
+	IssueTitle string   `json:"issue_title"`
+	Action    string    `json:"action"` // "added" or "removed"
+}
+
+// calculateBurndown computes burndown data for a sprint (bv-159)
+func calculateBurndown(sprint *model.Sprint, issues []model.Issue) BurndownOutput {
+	now := time.Now()
+
+	// Build issue map for sprint beads
+	issueMap := make(map[string]model.Issue, len(issues))
+	for _, iss := range issues {
+		issueMap[iss.ID] = iss
+	}
+
+	// Count total and completed issues in sprint
+	var sprintIssues []model.Issue
+	for _, beadID := range sprint.BeadIDs {
+		if iss, ok := issueMap[beadID]; ok {
+			sprintIssues = append(sprintIssues, iss)
+		}
+	}
+
+	totalIssues := len(sprintIssues)
+	completedIssues := 0
+	for _, iss := range sprintIssues {
+		if iss.Status == model.StatusClosed {
+			completedIssues++
+		}
+	}
+	remainingIssues := totalIssues - completedIssues
+
+	// Calculate days
+	totalDays := 0
+	elapsedDays := 0
+	remainingDays := 0
+
+	if !sprint.StartDate.IsZero() && !sprint.EndDate.IsZero() {
+		totalDays = int(sprint.EndDate.Sub(sprint.StartDate).Hours() / 24) + 1
+		if now.Before(sprint.StartDate) {
+			elapsedDays = 0
+			remainingDays = totalDays
+		} else if now.After(sprint.EndDate) {
+			elapsedDays = totalDays
+			remainingDays = 0
+		} else {
+			elapsedDays = int(now.Sub(sprint.StartDate).Hours()/24) + 1
+			remainingDays = totalDays - elapsedDays
+		}
+	}
+
+	// Calculate burn rates
+	idealBurnRate := 0.0
+	if totalDays > 0 {
+		idealBurnRate = float64(totalIssues) / float64(totalDays)
+	}
+
+	actualBurnRate := 0.0
+	if elapsedDays > 0 {
+		actualBurnRate = float64(completedIssues) / float64(elapsedDays)
+	}
+
+	// Calculate projected completion
+	var projectedComplete *time.Time
+	onTrack := true
+	if actualBurnRate > 0 && remainingIssues > 0 {
+		daysToComplete := float64(remainingIssues) / actualBurnRate
+		projected := now.AddDate(0, 0, int(daysToComplete)+1)
+		projectedComplete = &projected
+		onTrack = !projected.After(sprint.EndDate)
+	} else if remainingIssues == 0 {
+		// Already complete
+		onTrack = true
+	} else if elapsedDays > 0 && completedIssues == 0 {
+		// No progress made
+		onTrack = false
+	}
+
+	// Generate daily burndown points
+	dailyPoints := generateDailyBurndown(sprint, sprintIssues, now)
+
+	// Generate ideal line
+	idealLine := generateIdealLine(sprint, totalIssues)
+
+	return BurndownOutput{
+		GeneratedAt:       now.UTC(),
+		SprintID:          sprint.ID,
+		SprintName:        sprint.Name,
+		StartDate:         sprint.StartDate,
+		EndDate:           sprint.EndDate,
+		TotalDays:         totalDays,
+		ElapsedDays:       elapsedDays,
+		RemainingDays:     remainingDays,
+		TotalIssues:       totalIssues,
+		CompletedIssues:   completedIssues,
+		RemainingIssues:   remainingIssues,
+		IdealBurnRate:     idealBurnRate,
+		ActualBurnRate:    actualBurnRate,
+		ProjectedComplete: projectedComplete,
+		OnTrack:           onTrack,
+		DailyPoints:       dailyPoints,
+		IdealLine:         idealLine,
+		ScopeChanges:      []ScopeChangeEvent{}, // TODO: Track scope changes via git history
+	}
+}
+
+// generateDailyBurndown creates actual burndown points based on issue closure dates
+func generateDailyBurndown(sprint *model.Sprint, issues []model.Issue, now time.Time) []model.BurndownPoint {
+	if sprint.StartDate.IsZero() || sprint.EndDate.IsZero() {
+		return nil
+	}
+
+	var points []model.BurndownPoint
+	totalIssues := len(issues)
+
+	// Iterate through each day of the sprint
+	for d := sprint.StartDate; !d.After(sprint.EndDate) && !d.After(now); d = d.AddDate(0, 0, 1) {
+		dayEnd := d.Add(24*time.Hour - time.Second)
+		completed := 0
+
+		for _, iss := range issues {
+			if iss.Status == model.StatusClosed && iss.ClosedAt != nil && !iss.ClosedAt.After(dayEnd) {
+				completed++
+			}
+		}
+
+		points = append(points, model.BurndownPoint{
+			Date:      d,
+			Remaining: totalIssues - completed,
+			Completed: completed,
+		})
+	}
+
+	return points
+}
+
+// generateIdealLine creates the ideal burndown line
+func generateIdealLine(sprint *model.Sprint, totalIssues int) []model.BurndownPoint {
+	if sprint.StartDate.IsZero() || sprint.EndDate.IsZero() || totalIssues == 0 {
+		return nil
+	}
+
+	var points []model.BurndownPoint
+	totalDays := int(sprint.EndDate.Sub(sprint.StartDate).Hours()/24) + 1
+	burnPerDay := float64(totalIssues) / float64(totalDays)
+
+	for i := 0; i <= totalDays; i++ {
+		d := sprint.StartDate.AddDate(0, 0, i)
+		remaining := totalIssues - int(float64(i)*burnPerDay)
+		if remaining < 0 {
+			remaining = 0
+		}
+		points = append(points, model.BurndownPoint{
+			Date:      d,
+			Remaining: remaining,
+			Completed: totalIssues - remaining,
+		})
+	}
+
+	return points
 }
