@@ -48,7 +48,7 @@ func TestFindJSONLPath_NoJSONLFiles(t *testing.T) {
 	}
 }
 
-func TestFindJSONLPath_PrefersBeadsJSONL(t *testing.T) {
+func TestFindJSONLPath_PrefersIssuesJSONL(t *testing.T) {
 	dir := t.TempDir()
 	// Create multiple JSONL files
 	os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(`{"id":"1"}`), 0644)
@@ -59,23 +59,41 @@ func TestFindJSONLPath_PrefersBeadsJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if filepath.Base(path) != "beads.jsonl" {
-		t.Errorf("Expected beads.jsonl to be preferred, got: %s", path)
+	// Per beads upstream, issues.jsonl is canonical
+	if filepath.Base(path) != "issues.jsonl" {
+		t.Errorf("Expected issues.jsonl to be preferred (canonical per beads upstream), got: %s", path)
 	}
 }
 
-func TestFindJSONLPath_FallsBackToBeadsBase(t *testing.T) {
+func TestFindJSONLPath_FallsBackToBeadsJSONL(t *testing.T) {
 	dir := t.TempDir()
-	// Create beads.base.jsonl and issues.jsonl (no beads.jsonl)
-	os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(`{"id":"1"}`), 0644)
-	os.WriteFile(filepath.Join(dir, "beads.base.jsonl"), []byte(`{"id":"2"}`), 0644)
+	// Create beads.jsonl only (no issues.jsonl)
+	os.WriteFile(filepath.Join(dir, "beads.jsonl"), []byte(`{"id":"1"}`), 0644)
+	os.WriteFile(filepath.Join(dir, "other.jsonl"), []byte(`{"id":"2"}`), 0644)
 
 	path, err := loader.FindJSONLPath(dir)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
+	// beads.jsonl is second priority after issues.jsonl
+	if filepath.Base(path) != "beads.jsonl" {
+		t.Errorf("Expected beads.jsonl as fallback, got: %s", path)
+	}
+}
+
+func TestFindJSONLPath_FallsBackToBeadsBase(t *testing.T) {
+	dir := t.TempDir()
+	// Create only beads.base.jsonl (no issues.jsonl or beads.jsonl)
+	os.WriteFile(filepath.Join(dir, "beads.base.jsonl"), []byte(`{"id":"1"}`), 0644)
+	os.WriteFile(filepath.Join(dir, "other.jsonl"), []byte(`{"id":"2"}`), 0644)
+
+	path, err := loader.FindJSONLPath(dir)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	// beads.base.jsonl is last priority fallback
 	if filepath.Base(path) != "beads.base.jsonl" {
-		t.Errorf("Expected beads.base.jsonl, got: %s", path)
+		t.Errorf("Expected beads.base.jsonl as last resort fallback, got: %s", path)
 	}
 }
 
@@ -122,6 +140,84 @@ func TestFindJSONLPath_SkipsMergeArtifacts(t *testing.T) {
 	}
 	if strings.Contains(filepath.Base(path), "orig") || strings.Contains(filepath.Base(path), "merge") {
 		t.Errorf("Should not select merge artifacts, got: %s", path)
+	}
+}
+
+func TestFindJSONLPath_SkipsBeadsLeftArtifact(t *testing.T) {
+	dir := t.TempDir()
+	// Create beads.left.jsonl (git merge OURS artifact) and canonical file
+	os.WriteFile(filepath.Join(dir, "beads.left.jsonl"), []byte(`{"id":"stale"}`), 0644)
+	os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(`{"id":"current"}`), 0644)
+
+	path, err := loader.FindJSONLPath(dir)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if strings.Contains(filepath.Base(path), "left") {
+		t.Errorf("Should not select beads.left.jsonl merge artifact, got: %s", path)
+	}
+	if filepath.Base(path) != "issues.jsonl" {
+		t.Errorf("Expected issues.jsonl, got: %s", path)
+	}
+}
+
+func TestFindJSONLPath_SkipsBeadsRightArtifact(t *testing.T) {
+	dir := t.TempDir()
+	// Create beads.right.jsonl (git merge THEIRS artifact) and canonical file
+	os.WriteFile(filepath.Join(dir, "beads.right.jsonl"), []byte(`{"id":"theirs"}`), 0644)
+	os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(`{"id":"current"}`), 0644)
+
+	path, err := loader.FindJSONLPath(dir)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if strings.Contains(filepath.Base(path), "right") {
+		t.Errorf("Should not select beads.right.jsonl merge artifact, got: %s", path)
+	}
+}
+
+func TestFindJSONLPathWithWarnings_ReportsMergeArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	// Create merge artifacts and canonical file
+	os.WriteFile(filepath.Join(dir, "beads.left.jsonl"), []byte(`{"id":"stale"}`), 0644)
+	os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(`{"id":"current"}`), 0644)
+
+	var warnings []string
+	warnFunc := func(msg string) {
+		warnings = append(warnings, msg)
+	}
+
+	path, err := loader.FindJSONLPathWithWarnings(dir, warnFunc)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if filepath.Base(path) != "issues.jsonl" {
+		t.Errorf("Expected issues.jsonl, got: %s", path)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("Expected 1 warning about merge artifacts, got %d", len(warnings))
+	}
+	if !strings.Contains(warnings[0], "beads.left.jsonl") {
+		t.Errorf("Warning should mention beads.left.jsonl: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "bd clean") {
+		t.Errorf("Warning should suggest 'bd clean': %s", warnings[0])
+	}
+}
+
+func TestFindJSONLPath_IssuesPreferredOverBeadsBase(t *testing.T) {
+	dir := t.TempDir()
+	// Create both issues.jsonl and beads.base.jsonl
+	// issues.jsonl should be preferred per beads upstream
+	os.WriteFile(filepath.Join(dir, "beads.base.jsonl"), []byte(`{"id":"base"}`), 0644)
+	os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(`{"id":"canonical"}`), 0644)
+
+	path, err := loader.FindJSONLPath(dir)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if filepath.Base(path) != "issues.jsonl" {
+		t.Errorf("Expected issues.jsonl to be preferred over beads.base.jsonl, got: %s", path)
 	}
 }
 

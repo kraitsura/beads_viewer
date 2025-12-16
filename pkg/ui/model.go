@@ -154,20 +154,21 @@ type Model struct {
 	updateURL       string
 
 	// Focus and View State
-	focused               focus
-	isSplitView           bool
-	isBoardView           bool
-	isGraphView           bool
-	isActionableView      bool
-	isHistoryView         bool
-	showDetails           bool
-	showHelp              bool
-	showQuitConfirm       bool
-	ready                 bool
-	width                 int
-	height                int
-	showLabelHealthDetail bool
-	labelHealthDetail     *analysis.LabelHealth
+	focused                focus
+	isSplitView            bool
+	isBoardView            bool
+	isGraphView            bool
+	isActionableView       bool
+	isHistoryView          bool
+	showDetails            bool
+	showHelp               bool
+	showQuitConfirm        bool
+	ready                  bool
+	width                  int
+	height                 int
+	showLabelHealthDetail  bool
+	labelHealthDetail      *analysis.LabelHealth
+	labelHealthDetailFlows []labelCount
 
 	// Actionable view
 	actionableView ActionableModel
@@ -218,6 +219,12 @@ type Model struct {
 	availableRepos   []string        // List of repo prefixes available
 	activeRepos      map[string]bool // Which repos are currently shown (nil = all)
 	workspaceSummary string          // Summary text for footer (e.g., "3 repos")
+}
+
+// labelCount is a simple label->count pair for display
+type labelCount struct {
+	Label string
+	Count int
 }
 
 // WorkspaceInfo contains workspace loading metadata for TUI display
@@ -966,6 +973,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						lh := m.labelDashboard.labels[idx]
 						m.showLabelHealthDetail = true
 						m.labelHealthDetail = &lh
+						// Precompute cross-label flows for this label
+						m.labelHealthDetailFlows = m.getCrossFlowsForLabel(lh.Label)
 						return m, nil
 					}
 				}
@@ -1973,7 +1982,17 @@ func (m Model) renderLabelHealthDetail(lh analysis.LabelHealth) string {
 
 	sb.WriteString(labelStyle.Render("Blocked issues: "))
 	sb.WriteString(valStyle.Render(fmt.Sprintf("%d", lh.Blocked)))
-	sb.WriteString("\n")
+	sb.WriteString("\n\n")
+
+	if len(m.labelHealthDetailFlows) > 0 {
+		sb.WriteString(labelStyle.Render("Outgoing label deps (count): "))
+		var parts []string
+		for _, lc := range m.labelHealthDetailFlows {
+			parts = append(parts, fmt.Sprintf("%s:%d", lc.Label, lc.Count))
+		}
+		sb.WriteString(valStyle.Render(strings.Join(parts, ", ")))
+		sb.WriteString("\n")
+	}
 
 	sb.WriteString(t.Renderer.NewStyle().Foreground(t.Subtext).Render("esc/q/enter to close; enter on table selects label"))
 

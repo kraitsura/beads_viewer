@@ -1,14 +1,11 @@
 package analysis
 
 import (
-	"math"
 	"math/rand"
-	"sort"
 	"time"
 
 	"gonum.org/v1/gonum/graph"
 	"gonum.org/v1/gonum/graph/network"
-	"gonum.org/v1/gonum/graph/path"
 	"gonum.org/v1/gonum/graph/simple"
 )
 
@@ -143,112 +140,69 @@ func singleSourceBetweenness(g *simple.DirectedGraph, source graph.Node, bc map[
 	sourceID := source.ID()
 	nodes := graph.NodesOf(g.Nodes())
 
-	// Use shortest paths from gonum
-	pt := path.DijkstraFrom(source, g)
-
-	// Build the DAG of shortest paths and compute sigma (number of shortest paths)
-	// and delta (dependency accumulation)
+	// Data structures for Brandes' algorithm
 	sigma := make(map[int64]float64)  // Number of shortest paths through node
-	dist := make(map[int64]float64)   // Distance from source
+	dist := make(map[int64]int)       // Distance from source
 	delta := make(map[int64]float64)  // Dependency of source on node
 	pred := make(map[int64][]int64)   // Predecessors on shortest paths
 
+	// Initialization
 	for _, n := range nodes {
 		nid := n.ID()
 		sigma[nid] = 0
 		dist[nid] = -1 // -1 means unreachable
 		delta[nid] = 0
-		pred[nid] = nil
+		pred[nid] = make([]int64, 0)
 	}
 
 	sigma[sourceID] = 1
 	dist[sourceID] = 0
 
-	// BFS from source, building shortest path DAG
-	type nodeWithDist struct {
-		id   int64
-		dist float64
-	}
-	var stack []nodeWithDist
+	// Queue for BFS
+	queue := []int64{sourceID}
+	
+	// Stack for reverse traversal (accumulation)
+	var stack []int64
 
-	// First, compute distances using Dijkstra result
-	for _, n := range nodes {
-		nid := n.ID()
-		_, d := pt.To(nid)
-		// math.Inf(1) indicates unreachable
-		if d == math.Inf(1) || nid == sourceID {
-			continue
-		}
-		dist[nid] = d
-		stack = append(stack, nodeWithDist{id: nid, dist: d})
-	}
+	// BFS phase
+	for len(queue) > 0 {
+		v := queue[0]
+		queue = queue[1:]
+		stack = append(stack, v)
 
-	// Sort by distance (BFS order)
-	sort.Slice(stack, func(i, j int) bool {
-		return stack[i].dist < stack[j].dist
-	})
-
-	// Build sigma and predecessors
-	// For each node in BFS order, find predecessors on shortest paths
-	for _, nd := range stack {
-		nid := nd.id
-		nodeDist := nd.dist
-
-		// Find all predecessors that are on a shortest path
-		to := g.To(nid)
+		to := g.From(v) // Outgoing edges
 		for to.Next() {
-			predNode := to.Node()
-			predID := predNode.ID()
-			predDist := dist[predID]
+			w := to.Node().ID()
 
-			if predDist < 0 {
-				continue // Unreachable from source
+			// Path discovery
+			if dist[w] < 0 {
+				dist[w] = dist[v] + 1
+				queue = append(queue, w)
 			}
 
-			// Check if this edge is on a shortest path
-			// Edge (pred -> n) is on shortest path if dist[pred] + weight(pred,n) == dist[n]
-			// For unweighted graphs, weight = 1
-			if predDist+1 == nodeDist {
-				pred[nid] = append(pred[nid], predID)
-			}
-		}
-
-		// Compute sigma[nid] = sum of sigma[p] for all predecessors p
-		if len(pred[nid]) > 0 {
-			for _, p := range pred[nid] {
-				sigma[nid] += sigma[p]
-			}
-		} else if nid != sourceID {
-			// No predecessors means direct path from source (distance 1)
-			fromSource := g.To(nid)
-			for fromSource.Next() {
-				if fromSource.Node().ID() == sourceID {
-					sigma[nid] = 1
-					pred[nid] = []int64{sourceID}
-					break
-				}
+			// Path counting
+			if dist[w] == dist[v]+1 {
+				sigma[w] += sigma[v]
+				pred[w] = append(pred[w], v)
 			}
 		}
 	}
 
-	// Accumulation: traverse in reverse BFS order (farthest first)
+	// Accumulation phase
 	for i := len(stack) - 1; i >= 0; i-- {
-		nid := stack[i].id
-		if sigma[nid] == 0 {
+		w := stack[i]
+		if w == sourceID {
 			continue
 		}
 
-		// For each predecessor p of nid
-		for _, pid := range pred[nid] {
-			// delta[p] += (sigma[p] / sigma[nid]) * (1 + delta[nid])
-			if sigma[nid] > 0 {
-				delta[pid] += (sigma[pid] / sigma[nid]) * (1 + delta[nid])
+		for _, v := range pred[w] {
+			if sigma[w] > 0 {
+				delta[v] += (sigma[v] / sigma[w]) * (1 + delta[w])
 			}
 		}
 
-		// Add to betweenness (not for source node)
-		if nid != sourceID {
-			bc[nid] += delta[nid]
+		if w != sourceID {
+			bc[w] += delta[w]
 		}
 	}
 }

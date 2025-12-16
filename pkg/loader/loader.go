@@ -13,15 +13,22 @@ import (
 )
 
 // FindJSONLPath locates the beads JSONL file in the given directory.
-// Prefers beads.jsonl (canonical) over issues.jsonl (legacy fallback).
+// Prefers issues.jsonl (canonical per beads upstream) over beads.jsonl (backward compat).
 // Skips backup files and merge artifacts.
 func FindJSONLPath(beadsDir string) (string, error) {
+	return FindJSONLPathWithWarnings(beadsDir, nil)
+}
+
+// FindJSONLPathWithWarnings is like FindJSONLPath but optionally reports warnings
+// about detected merge artifacts via the provided callback.
+func FindJSONLPathWithWarnings(beadsDir string, warnFunc func(msg string)) (string, error) {
 	entries, err := os.ReadDir(beadsDir)
 	if err != nil {
 		return "", fmt.Errorf("failed to read beads directory: %w", err)
 	}
 
 	var candidates []string
+	var mergeArtifacts []string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -41,19 +48,32 @@ func FindJSONLPath(beadsDir string) (string, error) {
 			continue
 		}
 
+		// Skip git merge conflict artifacts (beads.left.jsonl, beads.right.jsonl)
+		// These are OURS/THEIRS sides during a merge conflict
+		if strings.HasPrefix(name, "beads.left") || strings.HasPrefix(name, "beads.right") {
+			mergeArtifacts = append(mergeArtifacts, name)
+			continue
+		}
+
 		candidates = append(candidates, name)
+	}
+
+	// Warn about detected merge artifacts
+	if len(mergeArtifacts) > 0 && warnFunc != nil {
+		warnFunc(fmt.Sprintf("Merge artifact files detected: %s. Consider running 'bd clean' to remove them.",
+			strings.Join(mergeArtifacts, ", ")))
 	}
 
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("no beads JSONL file found in %s", beadsDir)
 	}
 
-	// Priority order for beads files:
-	// 1. beads.jsonl (canonical)
-	// 2. beads.base.jsonl (bd's primary storage)
-	// 3. issues.jsonl (legacy)
+	// Priority order for beads files per beads upstream:
+	// 1. issues.jsonl (canonical - per steveyegge/beads pre-commit hook)
+	// 2. beads.jsonl (backward compatibility)
+	// 3. beads.base.jsonl (fallback, may be present during merge resolution)
 	// 4. First candidate
-	preferredNames := []string{"beads.jsonl", "beads.base.jsonl", "issues.jsonl"}
+	preferredNames := []string{"issues.jsonl", "beads.jsonl", "beads.base.jsonl"}
 
 	for _, preferred := range preferredNames {
 		for _, name := range candidates {

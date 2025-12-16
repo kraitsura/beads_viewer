@@ -18,3 +18,7 @@ benchmarks/current.txt
 # Local BV state and reports
 .bv/
 beads_report_beads_viewer_*.md
+
+# Rust/WASM build artifacts
+bv-graph-wasm/target/
+bv-graph-wasm/pkg/

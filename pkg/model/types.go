@@ -33,6 +33,59 @@ type Issue struct {
 	SourceRepo         string        `json:"source_repo,omitempty"`
 }
 
+// Clone creates a deep copy of the issue
+func (i Issue) Clone() Issue {
+	clone := i
+
+	if i.EstimatedMinutes != nil {
+		v := *i.EstimatedMinutes
+		clone.EstimatedMinutes = &v
+	}
+	if i.ClosedAt != nil {
+		v := *i.ClosedAt
+		clone.ClosedAt = &v
+	}
+	if i.ExternalRef != nil {
+		v := *i.ExternalRef
+		clone.ExternalRef = &v
+	}
+	if i.CompactedAt != nil {
+		v := *i.CompactedAt
+		clone.CompactedAt = &v
+	}
+	if i.CompactedAtCommit != nil {
+		v := *i.CompactedAtCommit
+		clone.CompactedAtCommit = &v
+	}
+
+	if i.Labels != nil {
+		clone.Labels = make([]string, len(i.Labels))
+		copy(clone.Labels, i.Labels)
+	}
+
+	if i.Dependencies != nil {
+		clone.Dependencies = make([]*Dependency, len(i.Dependencies))
+		for idx, dep := range i.Dependencies {
+			if dep != nil {
+				v := *dep
+				clone.Dependencies[idx] = &v
+			}
+		}
+	}
+
+	if i.Comments != nil {
+		clone.Comments = make([]*Comment, len(i.Comments))
+		for idx, comment := range i.Comments {
+			if comment != nil {
+				v := *comment
+				clone.Comments[idx] = &v
+			}
+		}
+	}
+
+	return clone
+}
+
 // Validate checks if the issue data is logically valid
 func (i *Issue) Validate() error {
 	if i.ID == "" {

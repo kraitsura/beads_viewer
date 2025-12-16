@@ -149,7 +149,9 @@ type RevisionInfo struct {
 
 // resolveRevision converts any revision specifier to a commit SHA
 func (g *GitLoader) resolveRevision(revision string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", revision)
+	// Use --verify to ensure we get a valid object SHA and avoid argument injection
+	// This also handles ambiguity between refs and files
+	cmd := exec.Command("git", "rev-parse", "--verify", revision)
 	cmd.Dir = g.repoPath
 
 	out, err := cmd.Output()
@@ -288,9 +290,11 @@ func (c *revisionCache) get(sha string) ([]model.Issue, bool) {
 		return nil, false
 	}
 
-	// Return a copy to prevent mutation
+	// Return a deep copy to prevent mutation
 	issues := make([]model.Issue, len(entry.issues))
-	copy(issues, entry.issues)
+	for i, issue := range entry.issues {
+		issues[i] = issue.Clone()
+	}
 	return issues, true
 }
 
@@ -298,9 +302,11 @@ func (c *revisionCache) set(sha string, issues []model.Issue) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Make a copy for storage
+	// Make a deep copy for storage
 	stored := make([]model.Issue, len(issues))
-	copy(stored, issues)
+	for i, issue := range issues {
+		stored[i] = issue.Clone()
+	}
 
 	c.entries[sha] = cacheEntry{
 		issues:    stored,

@@ -100,6 +100,8 @@ func (l *AggregateLoader) loadReposParallel(ctx context.Context, repos []RepoCon
 	var mu sync.Mutex
 
 	g, ctx := errgroup.WithContext(ctx)
+	// Limit concurrency to avoid resource exhaustion (file descriptors, memory)
+	g.SetLimit(32)
 
 	for i, repo := range repos {
 		i, repo := i, repo // capture loop variables
