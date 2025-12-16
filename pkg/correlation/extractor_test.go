@@ -478,4 +478,95 @@ func TestParseDiff(t *testing.T) {
 			t.Fatalf("Expected 2 events (skipping malformed), got %d", len(events))
 		}
 	})
+
+	t.Run("modification without status change", func(t *testing.T) {
+		diffData := []byte(`diff --git a/.beads/beads.jsonl b/.beads/beads.jsonl
+-{"id":"bv-123","title":"Old Title","status":"open"}
++{"id":"bv-123","title":"New Title","status":"open"}
+`)
+
+		events := e.parseDiff(diffData, info, "")
+
+		if len(events) != 1 {
+			t.Fatalf("Expected 1 event, got %d", len(events))
+		}
+		if events[0].EventType != EventModified {
+			t.Errorf("Expected EventModified, got %v", events[0].EventType)
+		}
+	})
+
+	t.Run("empty diff", func(t *testing.T) {
+		diffData := []byte(`diff --git a/.beads/beads.jsonl b/.beads/beads.jsonl
+`)
+
+		events := e.parseDiff(diffData, info, "")
+
+		if len(events) != 0 {
+			t.Errorf("Expected 0 events for empty diff, got %d", len(events))
+		}
+	})
+}
+
+func TestNewExtractor(t *testing.T) {
+	e := NewExtractor("/tmp/test")
+
+	if e.repoPath != "/tmp/test" {
+		t.Errorf("repoPath = %s, want /tmp/test", e.repoPath)
+	}
+	if len(e.beadsFiles) == 0 {
+		t.Error("beadsFiles should not be empty")
+	}
+}
+
+func TestSplitByCommits_Empty(t *testing.T) {
+	commits := splitByCommits([]byte{})
+	if commits != nil {
+		t.Error("splitByCommits of empty should return nil")
+	}
+}
+
+func TestSplitByCommits_NoMatch(t *testing.T) {
+	commits := splitByCommits([]byte("no commit headers here"))
+	if commits != nil {
+		t.Error("splitByCommits with no matches should return nil")
+	}
+}
+
+func TestCalculateCycleTime_NoCreatedMilestone(t *testing.T) {
+	now := time.Now()
+	claimed := BeadEvent{EventType: EventClaimed, Timestamp: now}
+	closed := BeadEvent{EventType: EventClosed, Timestamp: now.Add(24 * time.Hour)}
+
+	milestones := BeadMilestones{
+		Claimed: &claimed,
+		Closed:  &closed,
+	}
+
+	ct := CalculateCycleTime(milestones)
+
+	if ct == nil {
+		t.Fatal("CycleTime should not be nil")
+	}
+	if ct.ClaimToClose == nil {
+		t.Error("ClaimToClose should be set")
+	}
+	if ct.CreateToClose != nil {
+		t.Error("CreateToClose should be nil when no Created milestone")
+	}
+}
+
+func TestReverseEvents_Empty(t *testing.T) {
+	events := []BeadEvent{}
+	reverseEvents(events)
+	if len(events) != 0 {
+		t.Error("reverseEvents of empty should stay empty")
+	}
+}
+
+func TestReverseEvents_Single(t *testing.T) {
+	events := []BeadEvent{{BeadID: "a"}}
+	reverseEvents(events)
+	if events[0].BeadID != "a" {
+		t.Error("reverseEvents of single should keep it")
+	}
 }

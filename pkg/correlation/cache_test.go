@@ -435,3 +435,61 @@ func TestCachedCorrelator_InvalidateCache(t *testing.T) {
 		t.Errorf("CacheSize after invalidate = %d, want 0", stats.CacheSize)
 	}
 }
+
+func TestNewCachedCorrelatorWithOptions(t *testing.T) {
+	correlator := NewCachedCorrelatorWithOptions("/tmp/test", 10*time.Minute, 20)
+
+	if correlator.cache.maxAge != 10*time.Minute {
+		t.Errorf("maxAge = %v, want 10m", correlator.cache.maxAge)
+	}
+	if correlator.cache.maxSize != 20 {
+		t.Errorf("maxSize = %d, want 20", correlator.cache.maxSize)
+	}
+}
+
+func TestBuildCacheKey_Error(t *testing.T) {
+	// Should fail without a git repo
+	_, err := BuildCacheKey("/nonexistent/path", nil, CorrelatorOptions{})
+	if err == nil {
+		t.Error("BuildCacheKey should fail for invalid repo path")
+	}
+}
+
+func TestCacheKey_Empty(t *testing.T) {
+	key := CacheKey{}
+	if key.String() != "::" {
+		t.Errorf("Empty CacheKey.String() = %q, want '::'", key.String())
+	}
+}
+
+func TestHistoryCache_GetNonexistent(t *testing.T) {
+	cache := NewHistoryCache("/tmp/test")
+	key := CacheKey{HeadSHA: "nonexistent", BeadsHash: "hash", Options: "opts"}
+
+	_, ok := cache.Get(key)
+	if ok {
+		t.Error("Get should return false for nonexistent key")
+	}
+}
+
+func TestHistoryCache_RemoveEntryOrdering(t *testing.T) {
+	cache := NewHistoryCacheWithOptions("/tmp/test", 5*time.Minute, 5)
+
+	// Add multiple entries
+	for i := 0; i < 3; i++ {
+		key := CacheKey{HeadSHA: string(rune('a' + i))}
+		cache.Put(key, &HistoryReport{})
+	}
+
+	// Verify order
+	if len(cache.order) != 3 {
+		t.Errorf("order length = %d, want 3", len(cache.order))
+	}
+
+	// Remove middle entry
+	cache.Invalidate()
+
+	if len(cache.order) != 0 {
+		t.Errorf("order after invalidate = %d, want 0", len(cache.order))
+	}
+}

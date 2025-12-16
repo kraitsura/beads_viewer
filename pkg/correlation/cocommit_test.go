@@ -337,3 +337,107 @@ func TestCreateCorrelatedCommit(t *testing.T) {
 		t.Errorf("Author mismatch: got %s, want %s", commit.Author, event.Author)
 	}
 }
+
+func TestNewCoCommitExtractor(t *testing.T) {
+	c := NewCoCommitExtractor("/tmp/test")
+	if c.repoPath != "/tmp/test" {
+		t.Errorf("repoPath = %s, want /tmp/test", c.repoPath)
+	}
+}
+
+func TestExtractAllCoCommits_Empty(t *testing.T) {
+	c := NewCoCommitExtractor("/tmp/test")
+
+	// Empty events
+	commits, err := c.ExtractAllCoCommits(nil)
+	if err != nil {
+		t.Fatalf("ExtractAllCoCommits(nil) failed: %v", err)
+	}
+	if len(commits) != 0 {
+		t.Errorf("len(commits) = %d, want 0", len(commits))
+	}
+}
+
+func TestExtractAllCoCommits_NonStatusEvents(t *testing.T) {
+	c := NewCoCommitExtractor("/tmp/test")
+
+	// Only non-status events (created, modified)
+	events := []BeadEvent{
+		{BeadID: "bv-1", EventType: EventCreated, CommitSHA: "abc"},
+		{BeadID: "bv-2", EventType: EventModified, CommitSHA: "def"},
+	}
+
+	commits, err := c.ExtractAllCoCommits(events)
+	if err != nil {
+		t.Fatalf("ExtractAllCoCommits failed: %v", err)
+	}
+	// Should skip non-status events
+	if len(commits) != 0 {
+		t.Errorf("len(commits) = %d, want 0 (non-status events)", len(commits))
+	}
+}
+
+func TestGenerateReason_LargeCommit(t *testing.T) {
+	c := NewCoCommitExtractor("/test/repo")
+
+	event := BeadEvent{
+		BeadID:    "bv-123",
+		EventType: EventClaimed,
+		CommitMsg: "big change",
+	}
+
+	// Create > 20 files to trigger large commit message
+	files := make([]FileChange, 25)
+	for i := range files {
+		files[i] = FileChange{Path: "file" + string(rune('a'+i)) + ".go"}
+	}
+
+	reason := c.generateReason(event, files, 0.85)
+
+	if !strings.Contains(reason, "large commit") {
+		t.Errorf("reason should mention large commit, got: %s", reason)
+	}
+}
+
+func TestGenerateReason_OnlyTestFiles(t *testing.T) {
+	c := NewCoCommitExtractor("/test/repo")
+
+	event := BeadEvent{
+		BeadID:    "bv-123",
+		EventType: EventClaimed,
+		CommitMsg: "add tests",
+	}
+
+	files := []FileChange{
+		{Path: "auth_test.go"},
+		{Path: "login_test.go"},
+	}
+
+	reason := c.generateReason(event, files, 0.90)
+
+	if !strings.Contains(reason, "test files") {
+		t.Errorf("reason should mention test files, got: %s", reason)
+	}
+}
+
+func TestCalculateConfidence_Combined(t *testing.T) {
+	c := NewCoCommitExtractor("/test/repo")
+
+	// Test combination: shotgun commit with bead ID mention
+	event := BeadEvent{
+		BeadID:    "bv-123",
+		CommitMsg: "big refactor bv-123",
+	}
+
+	files := make([]FileChange, 30)
+	for i := range files {
+		files[i] = FileChange{Path: "file" + string(rune('a'+i)) + ".go"}
+	}
+
+	confidence := c.calculateConfidence(event, files)
+
+	// Base 0.95 + 0.04 (bead ID) - 0.10 (shotgun) = 0.89
+	if confidence < 0.88 || confidence > 0.90 {
+		t.Errorf("Combined confidence = %v, expected ~0.89", confidence)
+	}
+}

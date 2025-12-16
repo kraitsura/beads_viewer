@@ -237,3 +237,156 @@ func TestDedupCommits(t *testing.T) {
 		t.Errorf("expected first commit message to be 'First', got %s", result[0].Message)
 	}
 }
+
+func TestNewCorrelator(t *testing.T) {
+	c := NewCorrelator("/tmp/test")
+	if c.repoPath != "/tmp/test" {
+		t.Errorf("repoPath = %s, want /tmp/test", c.repoPath)
+	}
+	if c.extractor == nil {
+		t.Error("extractor should not be nil")
+	}
+	if c.coCommitter == nil {
+		t.Error("coCommitter should not be nil")
+	}
+}
+
+func TestValidateRepository_NoGitDir(t *testing.T) {
+	err := ValidateRepository("/nonexistent/path")
+	if err == nil {
+		t.Error("ValidateRepository should fail for nonexistent path")
+	}
+}
+
+func TestValidateRepository_NoBeadsFile(t *testing.T) {
+	// Use temp dir that exists but has no beads
+	err := ValidateRepository("/tmp")
+	if err == nil {
+		t.Error("ValidateRepository should fail without beads file")
+	}
+}
+
+func TestFindLatestCommitSHA_Empty(t *testing.T) {
+	c := NewCorrelator("/tmp/test")
+
+	sha := c.findLatestCommitSHA(nil, nil)
+	if sha != "" {
+		t.Errorf("findLatestCommitSHA with empty inputs should return empty, got %s", sha)
+	}
+}
+
+func TestFindLatestCommitSHA_FromEvents(t *testing.T) {
+	c := NewCorrelator("/tmp/test")
+
+	now := time.Now()
+	events := []BeadEvent{
+		{CommitSHA: "older", Timestamp: now.Add(-1 * time.Hour)},
+		{CommitSHA: "newest", Timestamp: now},
+		{CommitSHA: "middle", Timestamp: now.Add(-30 * time.Minute)},
+	}
+
+	sha := c.findLatestCommitSHA(events, nil)
+	if sha != "newest" {
+		t.Errorf("findLatestCommitSHA = %s, want 'newest'", sha)
+	}
+}
+
+func TestFindLatestCommitSHA_FromCommits(t *testing.T) {
+	c := NewCorrelator("/tmp/test")
+
+	now := time.Now()
+	commits := []CorrelatedCommit{
+		{SHA: "commit_old", Timestamp: now.Add(-1 * time.Hour)},
+		{SHA: "commit_newest", Timestamp: now},
+	}
+
+	sha := c.findLatestCommitSHA(nil, commits)
+	if sha != "commit_newest" {
+		t.Errorf("findLatestCommitSHA = %s, want 'commit_newest'", sha)
+	}
+}
+
+func TestFindLatestCommitSHA_Mixed(t *testing.T) {
+	c := NewCorrelator("/tmp/test")
+
+	now := time.Now()
+	events := []BeadEvent{
+		{CommitSHA: "event_sha", Timestamp: now.Add(-1 * time.Hour)},
+	}
+	commits := []CorrelatedCommit{
+		{SHA: "commit_sha", Timestamp: now}, // This is newer
+	}
+
+	sha := c.findLatestCommitSHA(events, commits)
+	if sha != "commit_sha" {
+		t.Errorf("findLatestCommitSHA = %s, want 'commit_sha' (newer)", sha)
+	}
+}
+
+func TestBuildHistories_WithCommits(t *testing.T) {
+	c := NewCorrelator("/tmp/test")
+
+	beads := []BeadInfo{
+		{ID: "bv-1", Title: "Task 1", Status: "in_progress"},
+	}
+
+	now := time.Now()
+	events := []BeadEvent{
+		{BeadID: "bv-1", EventType: EventClaimed, Timestamp: now, CommitSHA: "abc123"},
+	}
+
+	commits := []CorrelatedCommit{
+		{SHA: "abc123", Author: "Test Author"},
+	}
+
+	histories := c.buildHistories(beads, events, commits)
+
+	h := histories["bv-1"]
+	if len(h.Commits) != 1 {
+		t.Errorf("expected 1 commit, got %d", len(h.Commits))
+	}
+	if h.LastAuthor != "Test Author" {
+		t.Errorf("LastAuthor = %s, want 'Test Author'", h.LastAuthor)
+	}
+}
+
+func TestCalculateStats_AvgCommitsPerBead(t *testing.T) {
+	c := NewCorrelator("/tmp/test")
+
+	histories := map[string]BeadHistory{
+		"bv-1": {
+			Commits: []CorrelatedCommit{{SHA: "a1"}, {SHA: "a2"}},
+		},
+		"bv-2": {
+			Commits: []CorrelatedCommit{{SHA: "b1"}},
+		},
+		"bv-3": {
+			Commits: nil, // No commits
+		},
+	}
+
+	stats := c.calculateStats(histories, nil)
+
+	// 3 commits / 2 beads with commits = 1.5
+	if stats.AvgCommitsPerBead != 1.5 {
+		t.Errorf("AvgCommitsPerBead = %v, want 1.5", stats.AvgCommitsPerBead)
+	}
+}
+
+func TestDescribeGitRange_Combined(t *testing.T) {
+	c := NewCorrelator("/tmp/test")
+
+	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2024, 12, 31, 0, 0, 0, 0, time.UTC)
+	opts := CorrelatorOptions{
+		Since: &since,
+		Until: &until,
+		Limit: 100,
+	}
+
+	result := c.describeGitRange(opts)
+
+	if result != "since 2024-01-01, until 2024-12-31, limit 100 commits" {
+		t.Errorf("unexpected result: %s", result)
+	}
+}
