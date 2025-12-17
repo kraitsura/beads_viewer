@@ -1,6 +1,7 @@
 package analysis_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -101,7 +102,7 @@ func TestCache_GetSet(t *testing.T) {
 
 	// Create and cache stats
 	an := analysis.NewAnalyzer(issues)
-	graphStats := an.AnalyzeAsync()
+	graphStats := an.AnalyzeAsync(context.Background())
 	graphStats.WaitForPhase2()
 
 	cache.Set(issues, graphStats)
@@ -122,7 +123,7 @@ func TestCache_HashMismatch(t *testing.T) {
 	issues2 := []model.Issue{{ID: "B"}}
 
 	an := analysis.NewAnalyzer(issues1)
-	graphStats := an.AnalyzeAsync()
+	graphStats := an.AnalyzeAsync(context.Background())
 	graphStats.WaitForPhase2()
 
 	cache.Set(issues1, graphStats)
@@ -139,7 +140,7 @@ func TestCache_TTLExpiry(t *testing.T) {
 	issues := []model.Issue{{ID: "A"}}
 
 	an := analysis.NewAnalyzer(issues)
-	graphStats := an.AnalyzeAsync()
+	graphStats := an.AnalyzeAsync(context.Background())
 	graphStats.WaitForPhase2()
 
 	cache.Set(issues, graphStats)
@@ -165,7 +166,7 @@ func TestCache_Invalidate(t *testing.T) {
 	issues := []model.Issue{{ID: "A"}}
 
 	an := analysis.NewAnalyzer(issues)
-	graphStats := an.AnalyzeAsync()
+	graphStats := an.AnalyzeAsync(context.Background())
 	graphStats.WaitForPhase2()
 
 	cache.Set(issues, graphStats)
@@ -197,7 +198,7 @@ func TestCache_Stats(t *testing.T) {
 	}
 
 	an := analysis.NewAnalyzer(issues)
-	graphStats := an.AnalyzeAsync()
+	graphStats := an.AnalyzeAsync(context.Background())
 	graphStats.WaitForPhase2()
 
 	cache.Set(issues, graphStats)
@@ -299,7 +300,7 @@ func TestGlobalCache(t *testing.T) {
 
 	issues := []model.Issue{{ID: "test-global"}}
 	an := analysis.NewAnalyzer(issues)
-	stats := an.AnalyzeAsync()
+	stats := an.AnalyzeAsync(context.Background())
 	stats.WaitForPhase2()
 
 	cache.Set(issues, stats)

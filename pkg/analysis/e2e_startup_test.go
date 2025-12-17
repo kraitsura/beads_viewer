@@ -1,6 +1,7 @@
 package analysis_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -25,10 +26,10 @@ func skipIfNotPerfTest(t *testing.T) {
 // Note: These are conservative targets to account for CI variability.
 // In practice, performance is typically 2-5x faster on dedicated hardware.
 var performanceTargets = map[string]time.Duration{
-	"small":       200 * time.Millisecond,  // <50 issues
-	"medium":      500 * time.Millisecond,  // 50-300 issues
-	"large":       1 * time.Second,         // 300-1000 issues
-	"xl":          3 * time.Second,         // 1000-5000 issues
+	"small":        200 * time.Millisecond, // <50 issues
+	"medium":       500 * time.Millisecond, // 50-300 issues
+	"large":        1 * time.Second,        // 300-1000 issues
+	"xl":           3 * time.Second,        // 1000-5000 issues
 	"pathological": 5 * time.Second,        // Edge cases (should not hang)
 }
 
@@ -282,10 +283,10 @@ func generateRealisticIssues(n, avgDeps int) []model.Issue {
 
 	for i := 0; i < n; i++ {
 		issues[i] = model.Issue{
-			ID:       fmt.Sprintf("REAL-%d", i),
-			Title:    fmt.Sprintf("Issue %d", i),
-			Status:   statuses[i%len(statuses)],
-			Priority: i % 4,
+			ID:        fmt.Sprintf("REAL-%d", i),
+			Title:     fmt.Sprintf("Issue %d", i),
+			Status:    statuses[i%len(statuses)],
+			Priority:  i % 4,
 			IssueType: types[i%len(types)],
 		}
 
@@ -369,7 +370,7 @@ func TestPhase1Only_MediumProject(t *testing.T) {
 
 	start := time.Now()
 	an := analysis.NewAnalyzer(issues)
-	stats := an.AnalyzeAsync()
+	stats := an.AnalyzeAsync(context.Background())
 	elapsed := time.Since(start)
 
 	// Phase 1 should be essentially instant
@@ -399,7 +400,7 @@ func TestPhase1Only_LargeProject(t *testing.T) {
 
 	start := time.Now()
 	an := analysis.NewAnalyzer(issues)
-	stats := an.AnalyzeAsync()
+	stats := an.AnalyzeAsync(context.Background())
 	elapsed := time.Since(start)
 
 	// Phase 1 should be fast even for large projects
