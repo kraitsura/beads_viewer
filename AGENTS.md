@@ -1,97 +1,98 @@
 ### Using bv as an AI sidecar
 
-  bv is a fast terminal UI for Beads projects (.beads/beads.jsonl). It renders lists/details and precomputes dependency metrics (PageRank, critical path, cycles, etc.) so you instantly see blockers and execution order. For agents, it's a graph sidecar: instead of parsing JSONL or risking hallucinated traversal, call the robot flags to get deterministic, dependency-aware outputs.
+bv is a graph-aware triage engine for Beads projects (.beads/beads.jsonl). Instead of parsing JSONL or hallucinating graph traversal, use robot flags for deterministic, dependency-aware outputs with precomputed metrics (PageRank, betweenness, critical path, cycles, HITS, eigenvector, k-core).
 
-  **Scope boundary:** bv helps agents understand *what to work on next* (triage, priority, plan). It does NOT handle agent-to-agent communication, registration, or coordination. That functionality is provided by the complementary project [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail), which handles:
-  - Agent registration and identity management
-  - Message passing between agents
-  - Work claiming/handoff coordination
-  - File reservation and conflict detection
+**Scope boundary:** bv handles *what to work on* (triage, priority, planning). For agent-to-agent coordination (messaging, work claiming, file reservations), use [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail).
 
-  If you need multi-agent coordination features, use MCP Agent Mail alongside bv. Keep bv focused on issue triage and work prioritization.
+**⚠️ CRITICAL: Use ONLY `--robot-*` flags. Bare `bv` launches an interactive TUI that blocks your session.**
 
-  **Troubleshooting Agent Mail:** If Agent Mail/MCP messaging fails with an error like "Too many open files" (common on macOS where `ulimit -n` can default to 256), restart the Agent Mail server with a higher file-descriptor limit (example: `ulimit -n 4096; python -m mcp_agent_mail.cli serve-http`).
+**Troubleshooting Agent Mail:** If Agent Mail fails with "Too many open files" (common on macOS), restart with higher limit: `ulimit -n 4096; python -m mcp_agent_mail.cli serve-http`
 
-  - bv --robot-help — shows all AI-facing commands.
-  - **bv --robot-triage** — THE MEGA-COMMAND. Single entry point for AI agents. Returns unified JSON with:
-    - `quick_ref`: at-a-glance summary (open/actionable/blocked counts, top 3 picks)
-    - `recommendations`: ranked actionable items with scores, reasons, and unblock info
-    - `quick_wins`: low-complexity, high-impact items
-    - `blockers_to_clear`: items that unblock the most downstream work
-    - `project_health`: counts by status/type/priority, graph metrics
-    - `commands`: copy-paste commands for common next steps
-  - **bv --robot-next** — Minimal triage. Returns only the single top recommendation with claim/show commands. Use when you just need "what should I work on next?"
-  - bv --robot-insights — JSON graph metrics (PageRank, betweenness, HITS, critical path, cycles) with top-N summaries for quick triage.
-  - bv --robot-plan — JSON execution plan: parallel tracks, items per track, and unblocks lists showing what each item frees up.
-  - bv --robot-priority — JSON priority recommendations with reasoning and confidence.
-  - bv --robot-recipes — list recipes (default, actionable, blocked, etc.); apply via bv --recipe <name> to pre-filter/sort before other flags.
-  - bv --robot-diff --diff-since <commit|date> — JSON diff of issue changes, new/closed items, and cycles introduced/resolved.
-  - **bv --robot-history** — JSON bead-to-commit correlations. Tracks which code changes relate to which beads via git history analysis. Key sections:
-    - `stats`: Summary (total beads, beads with commits, avg cycle time)
-    - `histories`: Per-bead data (events, commits, milestones, cycle_time)
-    - `commit_index`: Reverse lookup from commit SHA to bead IDs
-    - Flags: `--bead-history <id>` (filter to single bead), `--history-since <ref>` (limit to recent), `--history-limit <n>` (max commits)
+#### The Workflow: Start With Triage
 
-  **Label-Centric Analysis Commands:**
-  - **bv --robot-label-health** — JSON health metrics per label. Key fields: `health_level` (healthy|warning|critical), `velocity_score`, `flow_score`, `staleness`, `blocked_count`.
-  - **bv --robot-label-flow** — JSON cross-label dependency flow. Shows `flow_matrix[from][to]`, `dependencies[{from,to,count}]`, `bottleneck_labels`. Use to identify which labels are blocking others.
-  - **bv --robot-label-attention [--attention-limit=N]** — JSON attention-ranked labels (default N=5). Ranks by attention_score = (pagerank × staleness × block_impact) / velocity. Use to find which labels need focus.
-  - **bv --label LABEL** — Scope other commands to a label's subgraph. Works with `--robot-insights`, `--robot-plan`, `--robot-priority`. Example: `bv --robot-insights --label api`
+**`bv --robot-triage` is your single entry point.** It returns everything you need in one call:
+- `quick_ref`: at-a-glance counts + top 3 picks
+- `recommendations`: ranked actionable items with scores, reasons, unblock info
+- `quick_wins`: low-effort high-impact items
+- `blockers_to_clear`: items that unblock the most downstream work
+- `project_health`: status/type/priority distributions, graph metrics
+- `commands`: copy-paste shell commands for next steps
 
-  **Label Analysis Examples:**
-  ```bash
-  # Find which labels need the most attention
-  bv --robot-label-attention --attention-limit=3
+```bash
+bv --robot-triage        # THE MEGA-COMMAND: start here
+bv --robot-next          # Minimal: just the single top pick + claim command
+```
 
-  # Get health metrics for all labels
-  bv --robot-label-health | jq '.results.labels[] | select(.health_level == "critical")'
+#### Other Commands
 
-  # Deep dive into a specific label
-  bv --robot-label-health | jq '.results.labels[] | select(.label == "api")'
+**Planning:**
+| Command | Returns |
+|---------|---------|
+| `--robot-plan` | Parallel execution tracks with `unblocks` lists |
+| `--robot-priority` | Priority misalignment detection with confidence |
 
-  # See how labels depend on each other
-  bv --robot-label-flow | jq '.flow.bottleneck_labels'
+**Graph Analysis:**
+| Command | Returns |
+|---------|---------|
+| `--robot-insights` | Full metrics: PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core, articulation points, slack |
+| `--robot-label-health` | Per-label health: `health_level` (healthy\|warning\|critical), `velocity_score`, `staleness`, `blocked_count` |
+| `--robot-label-flow` | Cross-label dependency: `flow_matrix`, `dependencies`, `bottleneck_labels` |
+| `--robot-label-attention [--attention-limit=N]` | Attention-ranked labels by: (pagerank × staleness × block_impact) / velocity |
 
-  # Scope planning to a specific label
-  bv --robot-plan --label backend
-  ```
+**History & Change Tracking:**
+| Command | Returns |
+|---------|---------|
+| `--robot-history` | Bead-to-commit correlations: `stats`, `histories` (per-bead events/commits/milestones), `commit_index` |
+| `--robot-diff --diff-since <ref>` | Changes since ref: new/closed/modified issues, cycles introduced/resolved |
 
-  **Recommended workflow for agents:**
-  1. Start with `bv --robot-next` for a quick "what's next?" answer
-  2. Use `bv --robot-triage` for comprehensive context when planning
-  3. Use `bv --robot-plan` for parallel work partitioning
-  4. Use `bv --robot-insights` when you need deep graph analysis
-  5. Use `bv --robot-label-attention` to identify which labels need focus
-  6. Use `bv --label X --robot-plan` to scope work to a specific domain
+**Other Commands:**
+| Command | Returns |
+|---------|---------|
+| `--robot-burndown <sprint>` | Sprint burndown, scope changes, at-risk items |
+| `--robot-forecast <id\|all>` | ETA predictions with dependency-aware scheduling |
+| `--robot-alerts` | Stale issues, blocking cascades, priority mismatches |
+| `--robot-suggest` | Hygiene: duplicates, missing deps, label suggestions, cycle breaks |
+| `--robot-graph [--graph-format=json\|dot\|mermaid]` | Dependency graph export |
+| `--export-graph <file.html>` | Self-contained interactive HTML visualization |
 
-  Use these commands instead of hand-rolling graph logic; bv already computes the hard parts so agents can act safely and quickly.
+#### Scoping & Filtering
 
-### bv Performance Considerations for AI Agents
+```bash
+bv --robot-plan --label backend              # Scope to label's subgraph
+bv --robot-insights --as-of HEAD~30          # Historical point-in-time
+bv --recipe actionable --robot-plan          # Pre-filter: ready to work (no blockers)
+bv --recipe high-impact --robot-triage       # Pre-filter: top PageRank scores
+bv --robot-triage --robot-triage-by-track    # Group by parallel work streams
+bv --robot-triage --robot-triage-by-label    # Group by domain
+```
 
-  bv uses a two-phase startup for responsive performance:
-  - **Phase 1 (instant):** Degree, topo sort, basic stats - available immediately
-  - **Phase 2 (async):** PageRank, betweenness, HITS, cycles - computed in background
+#### Understanding Robot Output
 
-  **For large graphs (>500 nodes):**
-  - Some expensive metrics (betweenness) may be skipped automatically
-  - Cycle detection limited to prevent exponential blowup
-  - Use `--robot-insights` and check for skipped metrics
+**All robot JSON includes:**
+- `data_hash` — Fingerprint of source beads.jsonl (verify consistency across calls)
+- `status` — Per-metric state: `computed|approx|timeout|skipped` + elapsed ms
+- `as_of` / `as_of_commit` — Present when using `--as-of`; contains ref and resolved SHA
 
-  **Timeout handling:**
-  - All expensive algorithms have 500ms timeouts
-  - Robot output includes timeout flags when metrics are incomplete
-  - Design agents to handle partial data gracefully
+**Two-phase analysis:**
+- **Phase 1 (instant):** degree, topo sort, density — always available immediately
+- **Phase 2 (async, 500ms timeout):** PageRank, betweenness, HITS, eigenvector, cycles — check `status` flags
 
-  **Diagnostic commands:**
-  - `bv --profile-startup` — detailed timing breakdown
-  - `bv --profile-startup --profile-json` — machine-readable profile
+**For large graphs (>500 nodes):** Some metrics may be approximated or skipped. Always check `status`.
 
-  **Best practices:**
-  - Use `--robot-plan` for immediate actionable items (fast, Phase 1 only)
-  - Use `--robot-insights` when you need full graph metrics (waits for Phase 2)
-  - Avoid `--force-full-analysis` unless absolutely needed (can be slow)
+#### jq Quick Reference
 
-  See [docs/performance.md](docs/performance.md) for detailed tuning guide.
+```bash
+bv --robot-triage | jq '.quick_ref'                        # At-a-glance summary
+bv --robot-triage | jq '.recommendations[0]'               # Top recommendation
+bv --robot-plan | jq '.plan.summary.highest_impact'        # Best unblock target
+bv --robot-insights | jq '.status'                         # Check metric readiness
+bv --robot-insights | jq '.Cycles'                         # Circular deps (must fix!)
+bv --robot-label-health | jq '.results.labels[] | select(.health_level == "critical")'
+```
+
+**Performance:** Phase 1 instant, Phase 2 async (500ms timeout). Prefer `--robot-plan` over `--robot-insights` when speed matters. Results cached by data hash. Use `bv --profile-startup` for diagnostics.
+
+Use bv instead of parsing beads.jsonl—it computes PageRank, critical paths, cycles, and parallel tracks deterministically.
 
 ---
 
