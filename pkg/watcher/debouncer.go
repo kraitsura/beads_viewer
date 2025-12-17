@@ -16,6 +16,7 @@ type Debouncer struct {
 	duration time.Duration
 	timer    *time.Timer
 	mu       sync.Mutex
+	seq      uint64
 }
 
 // NewDebouncer creates a new Debouncer with the specified duration.
@@ -35,17 +36,41 @@ func NewDebouncer(duration time.Duration) *Debouncer {
 func (d *Debouncer) Trigger(callback func()) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.seq++
+	seq := d.seq
 
 	if d.timer != nil {
 		d.timer.Stop()
 	}
-	d.timer = time.AfterFunc(d.duration, callback)
+	d.timer = time.AfterFunc(d.duration, func() {
+		shouldRun := func() bool {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+
+			// Only run the most recently scheduled callback. This avoids races where
+			// Stop() returns false because the timer has already fired and the old
+			// callback starts running concurrently.
+			if seq != d.seq {
+				return false
+			}
+			d.timer = nil
+			return true
+		}()
+		if !shouldRun {
+			return
+		}
+
+		callback()
+	})
 }
 
 // Cancel cancels any pending callback.
 func (d *Debouncer) Cancel() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	// Invalidate any callback that might already be executing due to timer races.
+	d.seq++
 
 	if d.timer != nil {
 		d.timer.Stop()

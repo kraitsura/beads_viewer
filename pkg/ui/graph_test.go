@@ -505,6 +505,12 @@ func TestGraphModelSelectionPreservation(t *testing.T) {
 	sel = g.SelectedIssue()
 	// Note: The selection behavior depends on whether B was actually selected
 	// and the sorting order. Just verify we have a valid selection.
+	if sel == nil {
+		t.Fatal("Expected selection after SetIssues")
+	}
+	if sel.ID != "B" && sel.ID != "D" {
+		t.Errorf("Expected selection to be one of {B,D}, got %q", sel.ID)
+	}
 	if g.TotalCount() != 2 {
 		t.Errorf("Expected 2 nodes, got %d", g.TotalCount())
 	}

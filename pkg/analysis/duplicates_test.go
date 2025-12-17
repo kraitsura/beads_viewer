@@ -112,8 +112,6 @@ func TestExtractKeywords_StopWordsFiltered(t *testing.T) {
 	}
 }
 
-
-
 // ============================================================================
 // DetectDuplicates Tests - Exact Duplicates
 // ============================================================================
@@ -334,7 +332,7 @@ func TestDetectDuplicates_SingleIssue(t *testing.T) {
 func TestDetectDuplicates_EmptyIssues(t *testing.T) {
 	suggestions := DetectDuplicates([]model.Issue{}, DefaultDuplicateConfig())
 
-	if suggestions != nil && len(suggestions) != 0 {
+	if len(suggestions) != 0 {
 		t.Errorf("DetectDuplicates() with empty input returned %d suggestions, want 0", len(suggestions))
 	}
 }

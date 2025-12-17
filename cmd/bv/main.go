@@ -159,6 +159,43 @@ func main() {
 	envRobot := os.Getenv("BV_ROBOT") == "1"
 	stdoutIsTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
+	robotMode := envRobot ||
+		*robotHelp ||
+		*robotInsights ||
+		*robotPlan ||
+		*robotPriority ||
+		*robotTriage ||
+		*robotTriageByTrack ||
+		*robotTriageByLabel ||
+		*robotNext ||
+		*robotDiff ||
+		*robotRecipes ||
+		*robotLabelHealth ||
+		*robotLabelFlow ||
+		*robotLabelAttention ||
+		*robotAlerts ||
+		*robotSuggest ||
+		*robotGraph ||
+		*robotSearch ||
+		*robotDriftCheck ||
+		*robotHistory ||
+		*robotSprintList ||
+		*robotSprintShow != "" ||
+		*robotForecast != "" ||
+		*robotBurndown != "" ||
+		*robotByLabel != "" ||
+		*robotByAssignee != "" ||
+		*robotCapacity ||
+		// When stdout is non-TTY, --diff-since auto-enables JSON output. Mark this
+		// as robot mode early so parsers keep stdout JSON clean.
+		(*diffSince != "" && !stdoutIsTTY)
+
+	// Mark robot mode for downstream packages (e.g., parsers) to keep stdout JSON clean.
+	if robotMode && !envRobot {
+		_ = os.Setenv("BV_ROBOT", "1")
+		envRobot = true
+	}
+
 	// Handle -r shorthand
 	if *recipeShort != "" && *recipeName == "" {
 		*recipeName = *recipeShort
@@ -685,7 +722,9 @@ func main() {
 	// Load recipes (needed for both --robot-recipes and --recipe)
 	recipeLoader, err := recipe.LoadDefault()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Error loading recipes: %v\n", err)
+		if !envRobot {
+			fmt.Fprintf(os.Stderr, "Warning: Error loading recipes: %v\n", err)
+		}
 		// Create empty loader to continue
 		recipeLoader = recipe.NewLoader()
 	}
@@ -767,9 +806,11 @@ func main() {
 
 		// Print workspace loading summary
 		if summary.FailedRepos > 0 {
-			fmt.Fprintf(os.Stderr, "Warning: %d repos failed to load\n", summary.FailedRepos)
-			for _, name := range summary.FailedRepoNames {
-				fmt.Fprintf(os.Stderr, "  - %s\n", name)
+			if !envRobot {
+				fmt.Fprintf(os.Stderr, "Warning: %d repos failed to load\n", summary.FailedRepos)
+				for _, name := range summary.FailedRepoNames {
+					fmt.Fprintf(os.Stderr, "  - %s\n", name)
+				}
 			}
 		}
 		// No live reload for workspace mode (multiple files)
@@ -806,7 +847,9 @@ func main() {
 	if *labelScope != "" {
 		sg := analysis.ComputeLabelSubgraph(issues, *labelScope)
 		if sg.IssueCount == 0 {
-			fmt.Fprintf(os.Stderr, "Warning: No issues found with label %q\n", *labelScope)
+			if !envRobot {
+				fmt.Fprintf(os.Stderr, "Warning: No issues found with label %q\n", *labelScope)
+			}
 		} else {
 			// Replace issues with the subgraph issues
 			subgraphIssues := make([]model.Issue, 0, len(sg.AllIssues))
@@ -1571,7 +1614,9 @@ func main() {
 		// Load drift config and run calculator
 		driftConfig, err := drift.LoadConfig(projectDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Error loading drift config: %v\n", err)
+			if !envRobot {
+				fmt.Fprintf(os.Stderr, "Warning: Error loading drift config: %v\n", err)
+			}
 			driftConfig = drift.DefaultConfig()
 		}
 
@@ -4164,6 +4209,7 @@ type sprintSnapshot struct {
 type scopeCommit struct {
 	sha       string
 	timestamp time.Time
+	order     int // stable ordering when timestamps are tied (git dates are second-granularity)
 	events    []ScopeChangeEvent
 }
 
@@ -4256,6 +4302,7 @@ func computeSprintScopeChanges(repoPath string, sprint *model.Sprint, issueMap m
 			commits = append(commits, scopeCommit{
 				sha:       currentSHA,
 				timestamp: currentTS.UTC(),
+				order:     len(commits),
 				events:    events,
 			})
 		}
@@ -4313,7 +4360,9 @@ func computeSprintScopeChanges(repoPath string, sprint *model.Sprint, issueMap m
 		if !commits[i].timestamp.Equal(commits[j].timestamp) {
 			return commits[i].timestamp.Before(commits[j].timestamp)
 		}
-		return commits[i].sha < commits[j].sha
+		// When commit timestamps are identical (common in tests), preserve the
+		// original git log order reversed into chronological order.
+		return commits[i].order > commits[j].order
 	})
 
 	var scopeChanges []ScopeChangeEvent
@@ -4368,11 +4417,6 @@ func setDifference(a, b []string) []string {
 		}
 	}
 	return out
-}
-
-// calculateBurndown computes burndown data for a sprint (bv-159)
-func calculateBurndown(sprint *model.Sprint, issues []model.Issue) BurndownOutput {
-	return calculateBurndownAt(sprint, issues, time.Now())
 }
 
 // calculateBurndownAt is a deterministic variant of calculateBurndown for testing.

@@ -3,9 +3,9 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"path/filepath"
-	"sync"
 
 	"golang.org/x/sync/errgroup"
 
@@ -40,7 +40,10 @@ func NewAggregateLoader(config *Config, workspaceRoot string) *AggregateLoader {
 	return &AggregateLoader{
 		config:        config,
 		workspaceRoot: workspaceRoot,
-		logger:        log.Default(),
+		// Silence by default. Callers can opt-in via SetLogger.
+		// This avoids polluting stderr (e.g., breaking robot JSON consumers that
+		// capture combined stdout/stderr).
+		logger: log.New(io.Discard, "", 0),
 	}
 }
 
@@ -97,7 +100,6 @@ func (l *AggregateLoader) getEnabledRepos() []RepoConfig {
 // loadReposParallel loads issues from all repos concurrently using errgroup
 func (l *AggregateLoader) loadReposParallel(ctx context.Context, repos []RepoConfig) ([]LoadResult, error) {
 	results := make([]LoadResult, len(repos))
-	var mu sync.Mutex
 
 	g, ctx := errgroup.WithContext(ctx)
 	// Limit concurrency to avoid resource exhaustion (file descriptors, memory)
@@ -109,27 +111,23 @@ func (l *AggregateLoader) loadReposParallel(ctx context.Context, repos []RepoCon
 		g.Go(func() error {
 			select {
 			case <-ctx.Done():
-				mu.Lock()
 				results[i] = LoadResult{
 					RepoName: repo.GetName(),
 					Prefix:   repo.GetPrefix(),
 					Error:    ctx.Err(),
 				}
-				mu.Unlock()
 				return nil // Don't propagate context errors as fatal
 			default:
 			}
 
 			issues, err := l.loadSingleRepo(repo)
 
-			mu.Lock()
 			results[i] = LoadResult{
 				RepoName: repo.GetName(),
 				Prefix:   repo.GetPrefix(),
 				Issues:   issues,
 				Error:    err,
 			}
-			mu.Unlock()
 
 			return nil // Individual repo errors are captured in results, not propagated
 		})

@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -60,6 +61,52 @@ func initGitRepo(t *testing.T) (string, string) {
 	return repoDir, strings.TrimSpace(string(out))
 }
 
+// initGitRepoWithMalformedIssues creates a git repo that uses issues.jsonl and includes
+// a malformed JSON line to verify robot-mode stderr cleanliness.
+func initGitRepoWithMalformedIssues(t *testing.T) string {
+	t.Helper()
+	repoDir := t.TempDir()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir beads: %v", err)
+	}
+
+	first := `{"id":"A","title":"Alpha","status":"open","priority":1,"issue_type":"task"}` + "\n" +
+		`{this is not json}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(first), 0o644); err != nil {
+		t.Fatalf("write issues v1: %v", err)
+	}
+
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=Test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	git("init")
+	git("add", ".beads/issues.jsonl")
+	git("commit", "-m", "initial")
+
+	second := `{"id":"A","title":"Alpha","status":"open","priority":1,"issue_type":"task"}` + "\n" +
+		`{"id":"B","title":"Beta","status":"open","priority":2,"issue_type":"task"}` + "\n" +
+		`{this is not json}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(second), 0o644); err != nil {
+		t.Fatalf("write issues v2: %v", err)
+	}
+	git("add", ".beads/issues.jsonl")
+	git("commit", "-m", "add B")
+
+	return repoDir
+}
+
 func TestRobotDiffIncludesHashesAndNewIssues(t *testing.T) {
 	bv := buildBvBinary(t)
 	repoDir, priorRev := initGitRepo(t)
@@ -106,6 +153,50 @@ func TestRobotDiffIncludesHashesAndNewIssues(t *testing.T) {
 	}
 	if payload.Diff.Summary.IssuesAdded != 1 {
 		t.Fatalf("expected issues_added=1, got %d", payload.Diff.Summary.IssuesAdded)
+	}
+}
+
+func TestDiffSinceAutoJSON_MalformedIssues_NoStderr(t *testing.T) {
+	bv := buildBvBinary(t)
+	repoDir := initGitRepoWithMalformedIssues(t)
+
+	cmd := exec.Command(bv, "--diff-since", "HEAD~1")
+	cmd.Dir = repoDir
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("--diff-since failed: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("expected empty stderr; got:\n%s", got)
+	}
+
+	var payload struct {
+		FromDataHash string `json:"from_data_hash"`
+		ToDataHash   string `json:"to_data_hash"`
+		Diff         struct {
+			NewIssues []struct {
+				ID string `json:"id"`
+			} `json:"new_issues"`
+			Summary struct {
+				IssuesAdded int `json:"issues_added"`
+			} `json:"summary"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json decode: %v\nout=%s", err, stdout.String())
+	}
+	if payload.FromDataHash == "" || payload.ToDataHash == "" {
+		t.Fatalf("expected both data hashes, got from=%q to=%q", payload.FromDataHash, payload.ToDataHash)
+	}
+	if payload.Diff.Summary.IssuesAdded != 1 {
+		t.Fatalf("expected issues_added=1, got %d", payload.Diff.Summary.IssuesAdded)
+	}
+	if len(payload.Diff.NewIssues) != 1 || payload.Diff.NewIssues[0].ID != "B" {
+		t.Fatalf("expected new issue B, got %+v", payload.Diff.NewIssues)
 	}
 }
 

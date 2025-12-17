@@ -51,6 +51,13 @@ func LoadSprintsFromFile(path string) ([]model.Sprint, error) {
 func ParseSprints(r io.Reader) ([]model.Sprint, error) {
 	var sprints []model.Sprint
 
+	warn := func(msg string) {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", msg)
+	}
+	if os.Getenv("BV_ROBOT") == "1" {
+		warn = func(string) {}
+	}
+
 	scanner := bufio.NewScanner(r)
 	// Allow reasonably sized sprint entries (keep smaller than issues).
 	const maxCapacity = 1024 * 1024 // 1MB
@@ -72,11 +79,11 @@ func ParseSprints(r io.Reader) ([]model.Sprint, error) {
 
 		var sprint model.Sprint
 		if err := json.Unmarshal(line, &sprint); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: skipping malformed sprint JSON on line %d: %v\n", lineNum, err)
+			warn(fmt.Sprintf("skipping malformed sprint JSON on line %d: %v", lineNum, err))
 			continue
 		}
 		if err := sprint.Validate(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: skipping invalid sprint on line %d: %v\n", lineNum, err)
+			warn(fmt.Sprintf("skipping invalid sprint on line %d: %v", lineNum, err))
 			continue
 		}
 

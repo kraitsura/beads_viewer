@@ -13,45 +13,6 @@ import (
 // Tests error handling and graceful degradation across various failure modes.
 
 // =============================================================================
-// Test Helpers
-// =============================================================================
-
-// runBvExpectError runs bv and expects a non-zero exit code.
-// Returns stderr output for verification.
-func runBvExpectError(t *testing.T, bv, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command(bv, args...)
-	cmd.Dir = dir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err == nil {
-		t.Fatalf("expected bv to fail with args %v, but it succeeded", args)
-	}
-
-	return stderr.String()
-}
-
-// runBvExpectSuccess runs bv and expects a zero exit code.
-func runBvExpectSuccess(t *testing.T, bv, dir string, args ...string) (string, string) {
-	t.Helper()
-	cmd := exec.Command(bv, args...)
-	cmd.Dir = dir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		t.Fatalf("expected bv to succeed with args %v, but got error: %v\nstderr: %s",
-			args, err, stderr.String())
-	}
-
-	return stdout.String(), stderr.String()
-}
-
-// =============================================================================
 // 1. Data Errors
 // =============================================================================
 

@@ -201,8 +201,12 @@ func ParseIssuesWithOptions(r io.Reader, opts ParseOptions) ([]model.Issue, erro
 	// Default warning handler prints to stderr
 	warn := opts.WarningHandler
 	if warn == nil {
-		warn = func(msg string) {
-			fmt.Fprintf(os.Stderr, "Warning: %s\n", msg)
+		if os.Getenv("BV_ROBOT") == "1" {
+			warn = func(string) {}
+		} else {
+			warn = func(msg string) {
+				fmt.Fprintf(os.Stderr, "Warning: %s\n", msg)
+			}
 		}
 	}
 

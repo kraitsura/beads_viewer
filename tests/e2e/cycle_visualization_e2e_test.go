@@ -588,24 +588,6 @@ func createMultipleCyclesRepo(t *testing.T) string {
 	return repoDir
 }
 
-// createSelfLoopRepo creates a node that depends on itself
-func createSelfLoopRepo(t *testing.T) string {
-	t.Helper()
-	repoDir := t.TempDir()
-	beadsPath := filepath.Join(repoDir, ".beads")
-	if err := os.MkdirAll(beadsPath, 0755); err != nil {
-		t.Fatalf("mkdir beads: %v", err)
-	}
-
-	// Self-loop: A depends on A
-	jsonl := `{"id": "self-loop", "title": "Self Loop", "status": "open", "priority": 1, "issue_type": "task", "dependencies": [{"issue_id": "self-loop", "depends_on_id": "self-loop", "type": "blocks"}]}`
-
-	if err := os.WriteFile(filepath.Join(beadsPath, "beads.jsonl"), []byte(jsonl), 0644); err != nil {
-		t.Fatalf("write beads.jsonl: %v", err)
-	}
-	return repoDir
-}
-
 // createNestedCyclesRepo creates overlapping cycles sharing common nodes
 func createNestedCyclesRepo(t *testing.T) string {
 	t.Helper()

@@ -265,6 +265,10 @@ func TestWorkflow_TimeTravelAnalysis(t *testing.T) {
 	cmd = exec.Command(bv, "--check-drift")
 	cmd.Dir = projectDir
 	out, err = cmd.CombinedOutput()
+	if err != nil {
+		// Drift check may return non-zero depending on severity configuration.
+		t.Logf("Drift check returned error (may be expected): %v", err)
+	}
 	// May or may not fail depending on severity
 	t.Logf("Drift check output: %s", string(out))
 
