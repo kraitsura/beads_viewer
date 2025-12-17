@@ -10,7 +10,7 @@ import (
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // makeTestIssue creates a test issue with given parameters.
@@ -85,7 +85,7 @@ func TestExport_CreatesDatabase(t *testing.T) {
 	}
 
 	// Verify we can query the database
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open exported database: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestExport_MaterializedView(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", filepath.Join(tmpDir, "beads.sqlite3"))
+	db, err := sql.Open("sqlite", filepath.Join(tmpDir, "beads.sqlite3"))
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestExport_WithLabels(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", filepath.Join(tmpDir, "beads.sqlite3"))
+	db, err := sql.Open("sqlite", filepath.Join(tmpDir, "beads.sqlite3"))
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestExport_WithClosedAt(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", filepath.Join(tmpDir, "beads.sqlite3"))
+	db, err := sql.Open("sqlite", filepath.Join(tmpDir, "beads.sqlite3"))
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestExport_EmptyData(t *testing.T) {
 	}
 
 	// Should still create a valid database
-	db, err := sql.Open("sqlite3", filepath.Join(tmpDir, "beads.sqlite3"))
+	db, err := sql.Open("sqlite", filepath.Join(tmpDir, "beads.sqlite3"))
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}

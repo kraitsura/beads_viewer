@@ -385,7 +385,39 @@ func TestCloudflare_IncludeClosed(t *testing.T) {
 	}
 }
 
-// TestCloudflare_ExcludeClosed verifies default excludes closed.
+// TestCloudflare_IncludeClosedByDefault verifies default includes closed issues.
+func TestCloudflare_IncludeClosedByDefault(t *testing.T) {
+	bv := buildBvBinary(t)
+	stageViewerAssets(t, bv)
+
+	repoDir := t.TempDir()
+	beadsPath := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsPath, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	exportDir := filepath.Join(repoDir, "bv-pages")
+
+	// Mix of open and closed
+	issueData := `{"id": "open-1", "title": "Open Issue", "status": "open", "priority": 1, "issue_type": "task"}
+{"id": "closed-1", "title": "Closed Issue", "status": "closed", "priority": 2, "issue_type": "task"}`
+	if err := os.WriteFile(filepath.Join(beadsPath, "issues.jsonl"), []byte(issueData), 0o644); err != nil {
+		t.Fatalf("write issues.jsonl: %v", err)
+	}
+
+	// Export without --pages-include-closed (default is true)
+	cmd := exec.Command(bv, "--export-pages", exportDir)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("--export-pages failed: %v\n%s", err, out)
+	}
+
+	meta := readMetaJSON(t, exportDir)
+	if meta.IssueCount != 2 {
+		t.Errorf("issue_count = %d, want 2 (including closed by default)", meta.IssueCount)
+	}
+}
+
+// TestCloudflare_ExcludeClosed verifies --pages-include-closed=false excludes closed.
 func TestCloudflare_ExcludeClosed(t *testing.T) {
 	bv := buildBvBinary(t)
 	stageViewerAssets(t, bv)
@@ -404,8 +436,8 @@ func TestCloudflare_ExcludeClosed(t *testing.T) {
 		t.Fatalf("write issues.jsonl: %v", err)
 	}
 
-	// Export without --pages-include-closed
-	cmd := exec.Command(bv, "--export-pages", exportDir)
+	// Export with --pages-include-closed=false
+	cmd := exec.Command(bv, "--export-pages", exportDir, "--pages-include-closed=false")
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("--export-pages failed: %v\n%s", err, out)

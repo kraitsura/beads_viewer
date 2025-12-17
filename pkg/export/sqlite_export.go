@@ -19,7 +19,7 @@ import (
 	"github.com/Dicklesworthstone/beads_viewer/pkg/analysis"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // SQLiteExporter exports bv data to a SQLite database for static deployment.
@@ -83,7 +83,7 @@ func (e *SQLiteExporter) Export(outputDir string) error {
 	_ = os.Remove(dbPath)
 
 	// Open database
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

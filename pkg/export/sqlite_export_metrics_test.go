@@ -84,7 +84,7 @@ func TestSQLiteExporter_InsertsMetricsAndTriageRecommendations(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(outDir, "beads.sqlite3")
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("Open sqlite db: %v", err)
 	}

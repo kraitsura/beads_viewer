@@ -61,13 +61,13 @@ func TestExportPages_IncludesHistoryAndRunsHooks(t *testing.T) {
 		}
 	}
 
-	// Viewer fix: d3.js script should include crossorigin (bv-z14d).
+	// Verify vendored scripts are present (all scripts are now local, not CDN)
 	indexBytes, err := os.ReadFile(filepath.Join(exportDir, "index.html"))
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
 	}
-	if !strings.Contains(string(indexBytes), "crossorigin") {
-		t.Fatalf("index.html missing crossorigin attribute")
+	if !strings.Contains(string(indexBytes), "vendor/") {
+		t.Fatalf("index.html missing vendored script references")
 	}
 
 	// History JSON should include at least one commit entry.

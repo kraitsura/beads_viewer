@@ -11,7 +11,7 @@ import (
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // TestExport_EndToEnd runs a comprehensive integration test with realistic data.
@@ -44,7 +44,7 @@ func TestExport_EndToEnd(t *testing.T) {
 	}
 
 	// Open and verify database
-	db, err := sql.Open("sqlite3", filepath.Join(tmpDir, "beads.sqlite3"))
+	db, err := sql.Open("sqlite", filepath.Join(tmpDir, "beads.sqlite3"))
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestExport_FTS5AdvancedSearch(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", filepath.Join(tmpDir, "beads.sqlite3"))
+	db, err := sql.Open("sqlite", filepath.Join(tmpDir, "beads.sqlite3"))
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestExport_UnicodeAndSpecialCharacters(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", filepath.Join(tmpDir, "beads.sqlite3"))
+	db, err := sql.Open("sqlite", filepath.Join(tmpDir, "beads.sqlite3"))
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestExport_DependencyIntegrity(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", filepath.Join(tmpDir, "beads.sqlite3"))
+	db, err := sql.Open("sqlite", filepath.Join(tmpDir, "beads.sqlite3"))
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestExport_QueryPerformance(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", filepath.Join(tmpDir, "beads.sqlite3"))
+	db, err := sql.Open("sqlite", filepath.Join(tmpDir, "beads.sqlite3"))
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
