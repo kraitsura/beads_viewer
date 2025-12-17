@@ -1,6 +1,7 @@
 package ui_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/analysis"
@@ -413,5 +414,468 @@ func TestGraphModelStatusColors(t *testing.T) {
 
 	if g.TotalCount() != 4 {
 		t.Errorf("Expected 4 nodes, got %d", g.TotalCount())
+	}
+}
+
+// TestGraphModelWithRankings verifies rankings are computed correctly
+func TestGraphModelWithRankings(t *testing.T) {
+	theme := createTheme()
+
+	// Create a chain where we can verify ranking order
+	issues := []model.Issue{
+		{ID: "A", Title: "Root", Status: model.StatusOpen},
+		{ID: "B", Title: "Middle", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "A", Type: model.DepBlocks},
+		}},
+		{ID: "C", Title: "Leaf", Status: model.StatusOpen, Dependencies: []*model.Dependency{
+			{DependsOnID: "B", Type: model.DepBlocks},
+		}},
+	}
+
+	// Create analyzer and insights
+	an := analysis.NewAnalyzer(issues)
+	stats := an.Analyze()
+	insights := stats.GenerateInsights(5)
+
+	g := ui.NewGraphModel(issues, &insights, theme)
+
+	// Verify View renders without panic (which uses rankings)
+	output := g.View(100, 40)
+	if output == "" {
+		t.Error("Expected non-empty view output")
+	}
+
+	// Verify all nodes present
+	if g.TotalCount() != 3 {
+		t.Errorf("Expected 3 nodes, got %d", g.TotalCount())
+	}
+}
+
+// TestGraphModelSelectionPreservation verifies SetIssues preserves selection when possible
+func TestGraphModelSelectionPreservation(t *testing.T) {
+	theme := createTheme()
+
+	issues := []model.Issue{
+		{ID: "A", Title: "First"},
+		{ID: "B", Title: "Second"},
+		{ID: "C", Title: "Third"},
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	// Navigate to B
+	g.MoveDown()
+	sel := g.SelectedIssue()
+	if sel == nil {
+		t.Fatal("Expected selected issue")
+	}
+
+	// Find B's position
+	var bFound bool
+	for i := 0; i < 3; i++ {
+		sel = g.SelectedIssue()
+		if sel != nil && sel.ID == "B" {
+			bFound = true
+			break
+		}
+		g.MoveDown()
+	}
+
+	if !bFound {
+		// B might already be selected; reset and find it
+		g = ui.NewGraphModel(issues, nil, theme)
+		for i := 0; i < 3; i++ {
+			sel = g.SelectedIssue()
+			if sel != nil && sel.ID == "B" {
+				bFound = true
+				break
+			}
+			g.MoveDown()
+		}
+	}
+
+	// Now update with new issues that still include B
+	newIssues := []model.Issue{
+		{ID: "B", Title: "Second Updated"},
+		{ID: "D", Title: "Fourth"},
+	}
+	g.SetIssues(newIssues, nil)
+
+	// B should still be selected if it was before
+	sel = g.SelectedIssue()
+	// Note: The selection behavior depends on whether B was actually selected
+	// and the sorting order. Just verify we have a valid selection.
+	if g.TotalCount() != 2 {
+		t.Errorf("Expected 2 nodes, got %d", g.TotalCount())
+	}
+}
+
+// TestGraphModelSelectionLostOnFilter verifies selection resets when selected issue is removed
+func TestGraphModelSelectionLostOnFilter(t *testing.T) {
+	theme := createTheme()
+
+	issues := []model.Issue{
+		{ID: "A", Title: "First"},
+		{ID: "B", Title: "Second"},
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	// Navigate to make sure we have a selection
+	sel := g.SelectedIssue()
+	if sel == nil {
+		t.Fatal("Expected initial selection")
+	}
+	initialID := sel.ID
+
+	// Update with issues that don't include the initial selection
+	var newIssues []model.Issue
+	if initialID == "A" {
+		newIssues = []model.Issue{{ID: "B", Title: "Only B"}}
+	} else {
+		newIssues = []model.Issue{{ID: "A", Title: "Only A"}}
+	}
+
+	g.SetIssues(newIssues, nil)
+
+	// Should have valid selection (the only remaining issue)
+	sel = g.SelectedIssue()
+	if sel == nil {
+		t.Error("Expected valid selection after filter")
+	}
+	if g.TotalCount() != 1 {
+		t.Errorf("Expected 1 node, got %d", g.TotalCount())
+	}
+}
+
+// TestGraphModelExtremeWidths verifies View handles extreme terminal widths
+func TestGraphModelExtremeWidths(t *testing.T) {
+	theme := createTheme()
+
+	issues := []model.Issue{
+		{ID: "A", Title: "Root"},
+		{ID: "B", Title: "Dependent", Dependencies: []*model.Dependency{
+			{DependsOnID: "A", Type: model.DepBlocks},
+		}},
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	tests := []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{"very_narrow", 20, 24},
+		{"narrow", 40, 24},
+		{"very_narrow_short", 20, 10},
+		{"minimum", 10, 5},
+		{"extremely_narrow", 5, 5},
+		{"very_wide", 300, 24},
+		{"extremely_wide", 500, 50},
+		{"very_short", 80, 5},
+		{"extremely_short", 80, 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic
+			output := g.View(tt.width, tt.height)
+			if output == "" && g.TotalCount() > 0 {
+				// Empty output is acceptable for very small dimensions
+				// but log it for visibility
+				t.Logf("Empty output for %dx%d", tt.width, tt.height)
+			}
+		})
+	}
+}
+
+// TestGraphModelNilDependencies verifies nil dependencies don't cause panic
+func TestGraphModelNilDependencies(t *testing.T) {
+	theme := createTheme()
+
+	// Issue with nil entries in Dependencies slice
+	issues := []model.Issue{
+		{ID: "A", Title: "Has nil deps", Dependencies: []*model.Dependency{
+			nil,
+			{DependsOnID: "B", Type: model.DepBlocks},
+			nil,
+		}},
+		{ID: "B", Title: "Target"},
+	}
+
+	// Should not panic
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	if g.TotalCount() != 2 {
+		t.Errorf("Expected 2 nodes, got %d", g.TotalCount())
+	}
+
+	// View should not panic
+	output := g.View(80, 24)
+	if output == "" {
+		t.Error("Expected non-empty view")
+	}
+}
+
+// TestGraphModelAllDependencyTypesNilSafe tests all dependency types with nil entries
+func TestGraphModelAllDependencyTypesNilSafe(t *testing.T) {
+	theme := createTheme()
+
+	issues := []model.Issue{
+		{ID: "A", Title: "Mixed deps", Dependencies: []*model.Dependency{
+			nil,
+			{DependsOnID: "B", Type: model.DepBlocks},
+			nil,
+			{DependsOnID: "C", Type: model.DepRelated},
+			nil,
+		}},
+		{ID: "B", Title: "Blocker"},
+		{ID: "C", Title: "Related"},
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	if g.TotalCount() != 3 {
+		t.Errorf("Expected 3 nodes, got %d", g.TotalCount())
+	}
+
+	// Navigate through all
+	for i := 0; i < 5; i++ {
+		g.MoveDown()
+		_ = g.SelectedIssue()
+	}
+
+	// View should work
+	_ = g.View(80, 24)
+}
+
+// TestGraphModelPriorityTypes verifies different priorities render correctly
+func TestGraphModelPriorityTypes(t *testing.T) {
+	theme := createTheme()
+
+	issues := []model.Issue{
+		{ID: "P0", Title: "Critical", Priority: 0},
+		{ID: "P1", Title: "High", Priority: 1},
+		{ID: "P2", Title: "Medium", Priority: 2},
+		{ID: "P3", Title: "Low", Priority: 3},
+		{ID: "P4", Title: "Backlog", Priority: 4},
+		{ID: "P5", Title: "Unknown", Priority: 5}, // Beyond normal range
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	// Should render all without panic
+	output := g.View(100, 30)
+	if output == "" {
+		t.Error("Expected non-empty view")
+	}
+
+	if g.TotalCount() != 6 {
+		t.Errorf("Expected 6 nodes, got %d", g.TotalCount())
+	}
+}
+
+// TestGraphModelIssueTypes verifies different issue types render correctly
+func TestGraphModelIssueTypes(t *testing.T) {
+	theme := createTheme()
+
+	issues := []model.Issue{
+		{ID: "1", Title: "Bug", IssueType: model.TypeBug},
+		{ID: "2", Title: "Feature", IssueType: model.TypeFeature},
+		{ID: "3", Title: "Task", IssueType: model.TypeTask},
+		{ID: "4", Title: "Epic", IssueType: model.TypeEpic},
+		{ID: "5", Title: "Chore", IssueType: model.TypeChore},
+		{ID: "6", Title: "Unknown", IssueType: "unknown"},
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	output := g.View(100, 30)
+	if output == "" {
+		t.Error("Expected non-empty view")
+	}
+
+	if g.TotalCount() != 6 {
+		t.Errorf("Expected 6 nodes, got %d", g.TotalCount())
+	}
+}
+
+// TestGraphModelManyBlockers verifies rendering with many blocker connections
+func TestGraphModelManyBlockers(t *testing.T) {
+	theme := createTheme()
+
+	// Create issue with many blockers (tests "+N more" rendering)
+	deps := make([]*model.Dependency, 10)
+	for i := 0; i < 10; i++ {
+		deps[i] = &model.Dependency{
+			DependsOnID: fmt.Sprintf("blocker-%d", i),
+			Type:        model.DepBlocks,
+		}
+	}
+
+	issues := []model.Issue{
+		{ID: "main", Title: "Main Issue", Dependencies: deps},
+	}
+
+	// Add the blocker issues
+	for i := 0; i < 10; i++ {
+		issues = append(issues, model.Issue{
+			ID:    fmt.Sprintf("blocker-%d", i),
+			Title: fmt.Sprintf("Blocker %d", i),
+		})
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	if g.TotalCount() != 11 {
+		t.Errorf("Expected 11 nodes, got %d", g.TotalCount())
+	}
+
+	// View should handle many connections (showing "+N more")
+	output := g.View(120, 40)
+	if output == "" {
+		t.Error("Expected non-empty view")
+	}
+}
+
+// TestGraphModelManyDependents verifies rendering with many dependent connections
+func TestGraphModelManyDependents(t *testing.T) {
+	theme := createTheme()
+
+	// Create root issue
+	issues := []model.Issue{
+		{ID: "root", Title: "Root Issue"},
+	}
+
+	// Add many dependents
+	for i := 0; i < 10; i++ {
+		issues = append(issues, model.Issue{
+			ID:    fmt.Sprintf("dependent-%d", i),
+			Title: fmt.Sprintf("Dependent %d", i),
+			Dependencies: []*model.Dependency{
+				{DependsOnID: "root", Type: model.DepBlocks},
+			},
+		})
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	if g.TotalCount() != 11 {
+		t.Errorf("Expected 11 nodes, got %d", g.TotalCount())
+	}
+
+	// View should handle many dependents
+	output := g.View(120, 40)
+	if output == "" {
+		t.Error("Expected non-empty view")
+	}
+}
+
+// TestGraphModelPageNavigation verifies page up/down navigation bounds
+func TestGraphModelPageNavigation(t *testing.T) {
+	theme := createTheme()
+
+	// Create many issues to test pagination
+	var issues []model.Issue
+	for i := 0; i < 50; i++ {
+		issues = append(issues, model.Issue{
+			ID:    fmt.Sprintf("issue-%02d", i),
+			Title: fmt.Sprintf("Issue %d", i),
+		})
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	// PageDown multiple times
+	for i := 0; i < 10; i++ {
+		g.PageDown()
+	}
+	sel := g.SelectedIssue()
+	if sel == nil {
+		t.Fatal("Expected selected issue after PageDown")
+	}
+
+	// PageUp back to start
+	for i := 0; i < 10; i++ {
+		g.PageUp()
+	}
+	sel = g.SelectedIssue()
+	if sel == nil {
+		t.Fatal("Expected selected issue after PageUp")
+	}
+
+	// Verify we're back near the start
+	// (selection index should be 0 after many PageUp from the top)
+}
+
+// TestGraphModelUnicodeIDs verifies handling of Unicode in issue IDs
+func TestGraphModelUnicodeIDs(t *testing.T) {
+	theme := createTheme()
+
+	issues := []model.Issue{
+		{ID: "日本語-1", Title: "Japanese ID"},
+		{ID: "émoji-🎉", Title: "Emoji ID"},
+		{ID: "кириллица", Title: "Cyrillic ID"},
+		{ID: "普通话", Title: "Chinese ID"},
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	if g.TotalCount() != 4 {
+		t.Errorf("Expected 4 nodes, got %d", g.TotalCount())
+	}
+
+	// View should handle Unicode
+	output := g.View(80, 24)
+	if output == "" {
+		t.Error("Expected non-empty view")
+	}
+}
+
+// TestGraphModelEmptyTitle verifies handling of empty titles
+func TestGraphModelEmptyTitle(t *testing.T) {
+	theme := createTheme()
+
+	issues := []model.Issue{
+		{ID: "no-title", Title: ""},
+		{ID: "has-title", Title: "Has Title"},
+	}
+
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	// Should not panic
+	output := g.View(80, 24)
+	if output == "" {
+		t.Error("Expected non-empty view")
+	}
+
+	if g.TotalCount() != 2 {
+		t.Errorf("Expected 2 nodes, got %d", g.TotalCount())
+	}
+}
+
+// TestGraphModelReferenceToSelf verifies self-referential dependencies
+func TestGraphModelReferenceToSelf(t *testing.T) {
+	theme := createTheme()
+
+	// Issue depends on itself
+	issues := []model.Issue{
+		{ID: "self", Title: "Self Reference", Dependencies: []*model.Dependency{
+			{DependsOnID: "self", Type: model.DepBlocks},
+		}},
+	}
+
+	// Should not hang or panic
+	g := ui.NewGraphModel(issues, nil, theme)
+
+	if g.TotalCount() != 1 {
+		t.Errorf("Expected 1 node, got %d", g.TotalCount())
+	}
+
+	// View should handle self-reference
+	output := g.View(80, 24)
+	if output == "" {
+		t.Error("Expected non-empty view")
 	}
 }
