@@ -448,3 +448,124 @@ func TestDefaultCausalityOptions(t *testing.T) {
 		t.Error("Expected IncludeCommits to be true by default")
 	}
 }
+
+// TestBuildCausalityChain_SameTimestamps tests the edge case where all events
+// have the same timestamp (gap = 0 between all events). This previously caused
+// an array index out of bounds panic.
+func TestBuildCausalityChain_SameTimestamps(t *testing.T) {
+	// All events at the same timestamp
+	sameTime := testTime(0)
+	report := &HistoryReport{
+		DataHash: "test-hash",
+		Histories: map[string]BeadHistory{
+			"bv-same": {
+				BeadID: "bv-same",
+				Title:  "Same Timestamp Test",
+				Status: "closed",
+				Events: []BeadEvent{
+					{EventType: EventCreated, Timestamp: sameTime},
+					{EventType: EventClaimed, Timestamp: sameTime},
+					{EventType: EventClosed, Timestamp: sameTime},
+				},
+			},
+		},
+	}
+
+	opts := CausalityOptions{IncludeCommits: false}
+
+	// This should not panic (previously it would cause index out of bounds)
+	result := report.BuildCausalityChain("bv-same", opts)
+
+	if result == nil {
+		t.Fatal("Expected non-nil result")
+	}
+
+	// Check insights were computed without panic
+	if result.Insights == nil {
+		t.Fatal("Expected non-nil insights")
+	}
+
+	// With same timestamps, all gaps are 0
+	if result.Insights.LongestGap != nil && *result.Insights.LongestGap != 0 {
+		t.Errorf("Expected longest gap of 0, got %v", *result.Insights.LongestGap)
+	}
+
+	// LongestGapDesc should be computed without error
+	if result.Insights.LongestGapDesc == "" {
+		t.Error("Expected non-empty LongestGapDesc even with 0 gap")
+	}
+}
+
+// TestBuildCausalityChain_UnicodeCommitMessage tests that commit messages
+// with Unicode characters are truncated correctly by runes, not bytes.
+func TestBuildCausalityChain_UnicodeCommitMessage(t *testing.T) {
+	// Unicode message that would be broken if truncated by bytes
+	unicodeMsg := "修复中文测试问题，这是一个很长的提交消息，需要被正确截断" // Chinese characters
+
+	report := &HistoryReport{
+		DataHash: "test-hash",
+		Histories: map[string]BeadHistory{
+			"bv-unicode": {
+				BeadID: "bv-unicode",
+				Title:  "Unicode Test",
+				Status: "closed",
+				Events: []BeadEvent{
+					{EventType: EventCreated, Timestamp: testTime(0)},
+					{EventType: EventClosed, Timestamp: testTime(1)},
+				},
+				Commits: []CorrelatedCommit{
+					{ShortSHA: "abc1234", Message: unicodeMsg, Timestamp: testTime(0)},
+				},
+			},
+		},
+	}
+
+	opts := DefaultCausalityOptions()
+	result := report.BuildCausalityChain("bv-unicode", opts)
+
+	if result == nil {
+		t.Fatal("Expected non-nil result")
+	}
+
+	// Find the commit event
+	var commitEvent *CausalEvent
+	for i := range result.Chain.Events {
+		if result.Chain.Events[i].Type == CausalCommit {
+			commitEvent = &result.Chain.Events[i]
+			break
+		}
+	}
+
+	if commitEvent == nil {
+		t.Fatal("Expected to find commit event")
+	}
+
+	// Description should be valid UTF-8 (not broken by mid-byte truncation)
+	desc := commitEvent.Description
+	if !isValidUTF8(desc) {
+		t.Errorf("Commit description has invalid UTF-8: %q", desc)
+	}
+
+	// Should end with "..." if truncated
+	if len([]rune(unicodeMsg)) > 50 && !endsWithEllipsis(desc) {
+		t.Error("Expected truncated description to end with '...'")
+	}
+}
+
+func isValidUTF8(s string) bool {
+	for _, r := range s {
+		if r == '\uFFFD' { // Replacement character indicates invalid UTF-8
+			return false
+		}
+	}
+	return true
+}
+
+func endsWithEllipsis(s string) bool {
+	runes := []rune(s)
+	if len(runes) < 3 {
+		return false
+	}
+	last3 := string(runes[len(runes)-3:])
+	return last3 == "..."
+}

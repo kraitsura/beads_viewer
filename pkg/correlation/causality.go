@@ -156,8 +156,10 @@ func (hr *HistoryReport) BuildCausalityChain(beadID string, opts CausalityOption
 	if opts.IncludeCommits {
 		for _, commit := range history.Commits {
 			desc := commit.Message
-			if len(desc) > 50 {
-				desc = desc[:47] + "..."
+			// Truncate by runes (not bytes) to avoid splitting multi-byte characters
+			runes := []rune(desc)
+			if len(runes) > 50 {
+				desc = string(runes[:47]) + "..."
 			}
 			rawEvents = append(rawEvents, rawEvent{
 				timestamp:   commit.Timestamp,
@@ -309,7 +311,7 @@ func buildInsights(chain *CausalChain, history BeadHistory) *CausalInsights {
 	if len(chain.Events) > 1 {
 		var totalGap time.Duration
 		var longestGap time.Duration
-		var longestGapIdx int
+		longestGapIdx := 1 // Initialize to 1 (first valid gap index), not 0
 
 		for i := 1; i < len(chain.Events); i++ {
 			gap := chain.Events[i].Timestamp.Sub(chain.Events[i-1].Timestamp)
@@ -323,6 +325,7 @@ func buildInsights(chain *CausalChain, history BeadHistory) *CausalInsights {
 		avgGap := totalGap / time.Duration(len(chain.Events)-1)
 		insights.AvgTimeBetween = &avgGap
 		insights.LongestGap = &longestGap
+		// longestGapIdx is always >= 1 since we initialize to 1 and only update with i >= 1
 		insights.LongestGapDesc = formatGapDescription(chain.Events[longestGapIdx-1], chain.Events[longestGapIdx], longestGap)
 	}
 

@@ -1302,7 +1302,9 @@ func (b BoardModel) renderCard(issue model.Issue, width int, selected bool, colI
 
 // renderExpandedCard creates an expanded inline view of a card (bv-i3ii)
 // Shows full description, dependencies with titles, and all labels
-func (b BoardModel) renderExpandedCard(issue model.Issue, width int, colIdx, rowIdx int) string {
+// Note: colIdx, rowIdx kept for API consistency with renderCard but unused since
+// expanded card is always the selected card (no separate search highlighting needed)
+func (b BoardModel) renderExpandedCard(issue model.Issue, width int, _, _ int) string {
 	t := b.theme
 
 	// ══════════════════════════════════════════════════════════════════════════
