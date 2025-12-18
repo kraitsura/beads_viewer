@@ -444,7 +444,13 @@ func DeleteCloudflareProject(projectName string, confirm bool) error {
 }
 
 // OpenCloudflareInBrowser opens the Cloudflare Pages dashboard in browser.
+// Set BV_NO_BROWSER=1 to suppress browser opening (useful for tests).
 func OpenCloudflareInBrowser(projectName string) error {
+	// Skip browser opening in test mode or when explicitly disabled
+	if os.Getenv("BV_NO_BROWSER") != "" || os.Getenv("BV_TEST_MODE") != "" {
+		return nil
+	}
+
 	url := fmt.Sprintf("https://dash.cloudflare.com/?to=/:account/pages/view/%s", projectName)
 
 	var cmd *exec.Cmd
