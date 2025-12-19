@@ -2037,6 +2037,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusIsError = false
 				return m, nil
 
+			case "v":
+				// Open lens dashboard (tree view with workstream support)
+				m.clearAttentionOverlay()
+				m.isGraphView = false
+				m.isBoardView = false
+				m.isActionableView = false
+				m.isHistoryView = false
+				m.showLensDashboard = true
+				m.focused = focusLensDashboard
+				// Initialize lens dashboard with current selected issue or first epic
+				if len(m.issues) > 0 {
+					issueMap := make(map[string]*model.Issue)
+					for i := range m.issues {
+						issueMap[m.issues[i].ID] = &m.issues[i]
+					}
+					m.issueMap = issueMap
+					// Find first epic or use selected issue
+					var entryID string
+					if selected := m.list.SelectedItem(); selected != nil {
+						if issueItem, ok := selected.(IssueItem); ok {
+							entryID = issueItem.Issue.ID
+						}
+					}
+					if entryID == "" {
+						for _, issue := range m.issues {
+							if issue.IssueType == model.TypeEpic {
+								entryID = issue.ID
+								break
+							}
+						}
+					}
+					if entryID == "" && len(m.issues) > 0 {
+						entryID = m.issues[0].ID
+					}
+					m.lensDashboard = NewLensDashboardModel(entryID, m.issues, issueMap, m.theme)
+					m.lensDashboard.SetSize(m.width, m.height-1)
+				}
+				m.statusMsg = "Lens view: j/k nav • w workstreams • d depth • c centered • enter select"
+				m.statusIsError = false
+				return m, nil
+
 			case "]", "f4":
 				// Attention view: compute attention scores (cached) and render as text
 				if !m.attentionCached {
@@ -2212,6 +2253,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case focusFlowMatrix:
 				m = m.handleFlowMatrixKeys(msg)
+
+			case focusLensDashboard:
+				m = m.handleLensDashboardKeys(msg)
 
 			case focusList:
 				m = m.handleListKeys(msg)
@@ -3446,6 +3490,9 @@ func (m Model) View() string {
 	} else if m.focused == focusLabelDashboard {
 		m.labelDashboard.SetSize(m.width, m.height-1)
 		body = m.labelDashboard.View()
+	} else if m.focused == focusLensDashboard || m.showLensDashboard {
+		m.lensDashboard.SetSize(m.width, m.height-1)
+		body = m.lensDashboard.View()
 	} else {
 		// Mobile view
 		if m.showDetails {
