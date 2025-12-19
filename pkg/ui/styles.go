@@ -72,6 +72,10 @@ var (
 	ColorTypeTask    = lipgloss.Color("#F1FA8C")
 	ColorTypeEpic    = lipgloss.Color("#BD93F9")
 	ColorTypeChore   = lipgloss.Color("#8BE9FD")
+
+	// Gradient colors for lens UI
+	GradientHigh = lipgloss.Color("#BD93F9") // Purple
+	GradientPeak = lipgloss.Color("#FF79C6") // Pink
 )
 
 // ══════════════════════════════════════════════════════════════════════════════

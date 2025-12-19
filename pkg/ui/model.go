@@ -49,6 +49,7 @@ const (
 	focusBoard
 	focusGraph
 	focusLabelDashboard
+	focusLensDashboard
 	focusInsights
 	focusActionable
 	focusRecipePicker
@@ -265,6 +266,7 @@ type Model struct {
 	renderer           *MarkdownRenderer
 	board              BoardModel
 	labelDashboard     LabelDashboardModel
+	lensDashboard      LensDashboardModel // Advanced tree-based dashboard with workstream support
 	velocityComparison VelocityComparisonModel // bv-125
 	shortcutsSidebar   ShortcutsSidebar        // bv-3qi5
 	graphView          GraphModel
@@ -293,6 +295,7 @@ type Model struct {
 	height                   int
 	showLabelHealthDetail    bool
 	showLabelDrilldown       bool
+	showLensDashboard        bool // Show the lens dashboard (tree view with workstreams)
 	labelHealthDetail        *analysis.LabelHealth
 	labelHealthDetailFlow    labelFlowSummary
 	labelDrilldownLabel      string
@@ -2628,6 +2631,68 @@ func (m Model) handleActionableKeys(msg tea.KeyMsg) Model {
 				}
 			}
 			m.isActionableView = false
+			m.focused = focusList
+			if m.isSplitView {
+				m.focused = focusDetail
+			} else {
+				m.showDetails = true
+			}
+			m.updateViewportContent()
+		}
+	}
+	return m
+}
+
+// handleLensDashboardKeys handles keyboard input when lens dashboard is focused
+func (m Model) handleLensDashboardKeys(msg tea.KeyMsg) Model {
+	switch msg.String() {
+	case "w":
+		// Toggle between flat and workstream views
+		m.lensDashboard.ToggleViewType()
+		if m.lensDashboard.IsWorkstreamView() {
+			m.statusMsg = "Switched to workstream view"
+		} else {
+			m.statusMsg = "Switched to flat view"
+		}
+		m.statusIsError = false
+	case "j", "down":
+		m.lensDashboard.MoveDown()
+	case "k", "up":
+		m.lensDashboard.MoveUp()
+	case "g":
+		m.lensDashboard.GoToTop()
+	case "G":
+		m.lensDashboard.GoToBottom()
+	case "ctrl+d":
+		m.lensDashboard.PageDown()
+	case "ctrl+u":
+		m.lensDashboard.PageUp()
+	case "d":
+		m.lensDashboard.CycleDepth()
+		m.statusMsg = fmt.Sprintf("Depth: %v", m.lensDashboard.GetDepth())
+		m.statusIsError = false
+	case "c":
+		m.lensDashboard.ToggleCenteredMode()
+		if m.lensDashboard.IsCenteredMode() {
+			m.statusMsg = "Ego-centered mode enabled"
+		} else {
+			m.statusMsg = "Ego-centered mode disabled"
+		}
+		m.statusIsError = false
+	case "esc", "q":
+		m.showLensDashboard = false
+		m.focused = focusList
+	case "enter":
+		// Select issue and jump to detail view
+		selectedID := m.lensDashboard.SelectedIssueID()
+		if selectedID != "" {
+			for i, item := range m.list.Items() {
+				if issueItem, ok := item.(IssueItem); ok && issueItem.Issue.ID == selectedID {
+					m.list.Select(i)
+					break
+				}
+			}
+			m.showLensDashboard = false
 			m.focused = focusList
 			if m.isSplitView {
 				m.focused = focusDetail

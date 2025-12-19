@@ -35,6 +35,7 @@ import (
 	"github.com/Dicklesworthstone/beads_viewer/pkg/workspace"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func main() {
@@ -183,6 +184,13 @@ func main() {
 	debugWidth := flag.Int("debug-width", 180, "Width for debug render")
 	debugHeight := flag.Int("debug-height", 50, "Height for debug render")
 	flag.Parse()
+
+	// Parse positional arguments for subcommands like "bv review <issue_id>"
+	var reviewTarget string
+	positionalArgs := flag.Args()
+	if len(positionalArgs) >= 2 && positionalArgs[0] == "review" {
+		reviewTarget = positionalArgs[1]
+	}
 
 	// Ensure static export flags are retained even when build tags strip features in some environments.
 	_ = exportPages
@@ -4319,6 +4327,43 @@ func main() {
 	if activeRecipe != nil {
 		issues = applyRecipeFilters(issues, activeRecipe)
 		issues = applyRecipeSort(issues, activeRecipe)
+	}
+
+	// Handle interactive review mode (TUI)
+	if reviewTarget != "" && !*robotReview {
+		// Create theme for review dashboard
+		theme := ui.DefaultTheme(lipgloss.NewRenderer(os.Stdout))
+
+		// Get workspace root for review persistence
+		workspaceRoot, _ := os.Getwd()
+
+		// Launch review dashboard in TUI mode
+		reviewDash, err := ui.NewReviewDashboardModel(reviewTarget, issues, "", model.ReviewTypePlan, theme, workspaceRoot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating review dashboard: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Create and run the Bubble Tea program
+		p := tea.NewProgram(
+			ui.NewReviewProgram(reviewDash),
+			tea.WithAltScreen(),
+		)
+
+		if _, err := p.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running review TUI: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Save reviews on exit
+		result := reviewDash.SaveReviews()
+		if result.Failed > 0 {
+			fmt.Fprintf(os.Stderr, "Saved %d reviews, %d failed\n", result.Saved, result.Failed)
+		} else if result.Saved > 0 {
+			fmt.Printf("Saved %d reviews\n", result.Saved)
+		}
+
+		os.Exit(0)
 	}
 
 	// Initial Model with live reload support

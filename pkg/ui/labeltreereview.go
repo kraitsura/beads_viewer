@@ -14,21 +14,6 @@ import (
 	reflowtrunc "github.com/muesli/reflow/truncate"
 )
 
-// cutAfterWidth returns the portion of s after skipping startWidth visual cells
-func cutAfterWidth(s string, startWidth int) string {
-	if startWidth <= 0 {
-		return s
-	}
-	w := 0
-	for i, r := range s {
-		if w >= startWidth {
-			return s[i:]
-		}
-		w += ansi.PrintableRuneWidth(string(r))
-	}
-	return ""
-}
-
 // LabelReviewFlatNode represents a single node in the unified flat list
 type LabelReviewFlatNode struct {
 	Issue       *model.Issue

@@ -57,7 +57,8 @@ func (m NoteInputModel) Update(msg tea.Msg) (NoteInputModel, tea.Cmd) {
 		case "esc":
 			m.cancelled = true
 			return m, nil
-		case "ctrl+enter", "ctrl+s":
+		case "ctrl+enter", "ctrl+s", "ctrl+j":
+			// ctrl+j is alternate for terminals that don't support ctrl+enter
 			m.submitted = true
 			m.notes = m.textarea.Value()
 			return m, nil
@@ -106,7 +107,7 @@ func (m NoteInputModel) View() string {
 
 	// Hints
 	hintStyle := m.theme.Renderer.NewStyle().Faint(true)
-	b.WriteString(hintStyle.Render("[Ctrl+Enter] Submit  [Esc] Cancel"))
+	b.WriteString(hintStyle.Render("[Ctrl+Enter/Ctrl+J] Submit  [Esc] Cancel"))
 
 	// Wrap in box
 	boxStyle := m.theme.Renderer.NewStyle().

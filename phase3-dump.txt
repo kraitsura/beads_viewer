@@ -1,0 +1,183 @@
+Label Dashboard Dump: phase3
+Generated: 2025-12-17T22:51:29-08:00
+============================================================
+
+SUMMARY
+----------------------------------------
+  Total: 74 issues (24 primary, 50 context)
+  Ready: 9, Blocked: 44, In Progress: 3, Closed: 18
+  Progress: 24%
+  Dependency Depth: All
+
+WORKSTREAMS (Hierarchical)
+----------------------------------------
+[ws:feat:auth] Auth (10 issues, 0% done)
+  Ready: 2, Blocked: 8, In Progress: 0, Closed: 0
+  Issues:
+    - [bv-ey9.2.2] SMS backup codes (blocked)
+    - [bv-ey9.2.1] TOTP authenticator setup (blocked)
+    - [bv-2qm] Implement MFA TOTP generation (blocked)
+    - [bv-7w9] Add session management UI (blocked)
+    - [bv-jeb] Security audit for auth system (blocked)
+    - [bv-sa0] Add SMS backup codes for MFA (blocked)
+    - [bv-ne0] Write auth integration tests (blocked)
+    - [bv-cg1] Build MFA setup wizard UI (blocked)
+    - [bv-ey9] User Authentication System (open)
+    - [bv-ey9.2] Multi-Factor Authentication (open)
+
+[ws:feat:labels-viewer] Labels-viewer (10 issues, 0% done)
+  Ready: 1, Blocked: 6, In Progress: 0, Closed: 3
+  Issues:
+    - [bv-6in] Scoped tool integration (graph, insights) (blocked)
+    - [bv-nte] Apply label to downstream/upstream issues (blocked)
+    - [bv-lrp] Inline label creation (blocked)
+    - [bv-hqw] Multi-label selection with union/intersection (blocked)
+    - [bv-p73] Pinned labels with persistence (blocked)
+    - [bv-6i8] Labels Viewer - Long-horizon task coordination dashboard (open)
+    - [bv-37c] Dependency expansion for label view (closed)
+    - [bv-ljz] Basic label dashboard view (closed)
+    - [bv-jpk] Label selector UI with fuzzy search (closed)
+    - [bv-b3u] Session restoration for label view (open)
+
+[standalone] Standalone (41 issues, 36% done)
+  Ready: 4, Blocked: 25, In Progress: 0, Closed: 12
+  Issues:
+    - [bv-bpo] Fix rendering bug in list view (blocked)
+    - [bv-1zqm.3] Phase 3: Data Storage (open)
+    - [bv-9gxy] Add compression for cold data (open)
+    - [bv-cyju] Create backup automation (open)
+    - [bv-ifjk] Implement data archival policy (open)
+    - [bv-2fhz] Setup TimescaleDB partitions (open)
+    - [bv-6ix] Implement search functionality (blocked)
+    - [bv-vnly] Phase 3: Actions - Write beads integration for review status updates (closed)
+    - [bv-rfsi] Phase 3: Actions - Implement approve/revise/defer commands (closed)
+    - [bv-51j6] Phase 3: Actions - Implement note input modal for revisions (closed)
+    - [bv-svob] Phase 3: Actions - Implement add note without status change (closed)
+    - [bv-w8c] Test Workstream Algorithm Epic (open)
+    - [bv-1zqm] Data Pipeline Overhaul (open)
+    - [bv-1zqm.1] Phase 1: Data Ingestion (open)
+    - [bv-fk1x] Setup Kafka consumers (open)
+    - [bv-7xd4] Implement data validators (open)
+    - [bv-fkrm] Create ingestion retry logic (open)
+    - [bv-d1jw] Build dead letter queue handler (open)
+    - [bv-1zqm.2] Phase 2: Data Transformation (open)
+    - [bv-ow1y] Review Dashboard: Interactive Plan Approval Workflow (closed)
+    - [bv-h6vc] Phase 2: Dashboard - Implement split-panel layout with focus management (closed)
+    - [bv-kk2y] Phase 2: Dashboard - Implement detail panel with review history (closed)
+    - [bv-rsyz] Phase 2: Dashboard - Implement tree view rendering with review status indicators (closed)
+    - [bv-d4zs] Phase 2: Dashboard - Create ReviewDashboardModel base structure (closed)
+    - [bv-1zqm.4] Phase 4: Data Access Layer (open)
+    - [bv-1zqm.5] Phase 5: Monitoring & Observability (open)
+    - [bv-viaw] Implement SLA monitoring (open)
+    - [bv-akch] Build data quality dashboard (open)
+    - [bv-zifb] Create alerting rules (open)
+    - [bv-75f0] Setup pipeline metrics (open)
+    - [bv-iac5] Add query result pagination (open)
+    - [bv-r26j] Create API rate limiting (open)
+    - [bv-d8yf] Implement caching layer (open)
+    - [bv-88gf] Build query optimizer (open)
+    - [bv-m6u0] Phase 4: Sessions - Update counters on each review action (closed)
+    - [bv-942s] Phase 5: Polish - Add progress indicator and review stats header (closed)
+    - [bv-9vov] Phase 4: Sessions - Complete session and show summary on quit (closed)
+    - [bv-m2sz] Design transformation schema (open)
+    - [bv-o6v9] Implement JSON normalization (open)
+    - [bv-labq] Add data enrichment service (open)
+    - [bv-sv0w] Create field mapping rules (open)
+
+
+ISSUES BY DEPTH
+----------------------------------------
+
+Depth 0 (20 issues):
+  [bv-bpo] Fix rendering bug in list view (blocked)
+  [bv-1zqm.3] Phase 3: Data Storage (open)
+  [bv-ey9.2.2] SMS backup codes (blocked)
+  [bv-ey9.2.1] TOTP authenticator setup (blocked)
+  [bv-2qm] Implement MFA TOTP generation (blocked)
+  [bv-6ix] Implement search functionality (blocked)
+  [bv-6in] Scoped tool integration (graph, insights) (blocked)
+  [bv-nte] Apply label to downstream/upstream issues (blocked)
+  [bv-lrp] Inline label creation (blocked)
+  [bv-hqw] Multi-label selection with union/intersection (blocked)
+  [bv-p73] Pinned labels with persistence (blocked)
+  [bv-vnly] Phase 3: Actions - Write beads integration for review status updates (closed)
+  [bv-51j6] Phase 3: Actions - Implement note input modal for revisions (closed)
+  [bv-ey9] User Authentication System (open)
+  [bv-w8c] Test Workstream Algorithm Epic (open)
+  [bv-6i8] Labels Viewer - Long-horizon task coordination dashboard (open)
+  [bv-1zqm] Data Pipeline Overhaul (open)
+  [bv-xxi] Setup Redis cluster for sessions (open)
+  [bv-whh] Database migrations framework (open)
+  [bv-ow1y] Review Dashboard: Interactive Plan Approval Workflow (closed)
+
+Depth 1 (27 issues):
+  [bv-1zqm.4] Phase 4: Data Access Layer (open)
+  [bv-9gxy] Add compression for cold data (open)
+  [bv-cyju] Create backup automation (open)
+  [bv-ifjk] Implement data archival policy (open)
+  [bv-2fhz] Setup TimescaleDB partitions (open)
+  [bv-7w9] Add session management UI (blocked)
+  [bv-sa0] Add SMS backup codes for MFA (blocked)
+  [bv-cg1] Build MFA setup wizard UI (blocked)
+  [bv-b3u] Session restoration for label view (open)
+  [bv-rfsi] Phase 3: Actions - Implement approve/revise/defer commands (closed)
+  [bv-svob] Phase 3: Actions - Implement add note without status change (closed)
+  [bv-ey9.2] Multi-Factor Authentication (open)
+  [bv-6f6] Build login API endpoint (in_progress)
+  [bv-nk0] Create JWT token generation (in_progress)
+  [bv-kmw] Implement password hashing service (in_progress)
+  [bv-ag7] Design authentication database schema (open)
+  [bv-37c] Dependency expansion for label view (closed)
+  [bv-ljz] Basic label dashboard view (closed)
+  [bv-jpk] Label selector UI with fuzzy search (closed)
+  [bv-1zqm.1] Phase 1: Data Ingestion (open)
+  [bv-h6vc] Phase 2: Dashboard - Implement split-panel layout with focus management (closed)
+  [bv-kk2y] Phase 2: Dashboard - Implement detail panel with review history (closed)
+  [bv-rsyz] Phase 2: Dashboard - Implement tree view rendering with review status indicators (closed)
+  [bv-d4zs] Phase 2: Dashboard - Create ReviewDashboardModel base structure (closed)
+  [bv-t1ll] Phase 1: Data Layer - Add function to load issue tree with descendants and blockers (closed)
+  [bv-121r] Phase 1: Data Layer - Create SQLite database layer for reviews (closed)
+  [bv-5pwu] Phase 1: Data Layer - Create Review and ReviewSession models (closed)
+
+Depth 2 (10 issues):
+  [bv-1zqm.5] Phase 5: Monitoring & Observability (open)
+  [bv-iac5] Add query result pagination (open)
+  [bv-r26j] Create API rate limiting (open)
+  [bv-d8yf] Implement caching layer (open)
+  [bv-88gf] Build query optimizer (open)
+  [bv-jeb] Security audit for auth system (blocked)
+  [bv-ne0] Write auth integration tests (blocked)
+  [bv-m6u0] Phase 4: Sessions - Update counters on each review action (closed)
+  [bv-fk1x] Setup Kafka consumers (open)
+  [bv-1zqm.2] Phase 2: Data Transformation (open)
+
+Depth 3 (11 issues):
+  [bv-viaw] Implement SLA monitoring (open)
+  [bv-akch] Build data quality dashboard (open)
+  [bv-zifb] Create alerting rules (open)
+  [bv-75f0] Setup pipeline metrics (open)
+  [bv-zlj] Production deployment checklist (open)
+  [bv-soa] PCI compliance verification (blocked)
+  [bv-4pa] Performance load testing (open)
+  [bv-46c] Setup monitoring dashboard (open)
+  [bv-942s] Phase 5: Polish - Add progress indicator and review stats header (closed)
+  [bv-9vov] Phase 4: Sessions - Complete session and show summary on quit (closed)
+  [bv-7xd4] Implement data validators (open)
+
+Depth 4 (1 issues):
+  [bv-fkrm] Create ingestion retry logic (open)
+
+Depth 5 (1 issues):
+  [bv-d1jw] Build dead letter queue handler (open)
+
+Depth 6 (1 issues):
+  [bv-m2sz] Design transformation schema (open)
+
+Depth 7 (1 issues):
+  [bv-o6v9] Implement JSON normalization (open)
+
+Depth 8 (1 issues):
+  [bv-labq] Add data enrichment service (open)
+
+Depth 9 (1 issues):
+  [bv-sv0w] Create field mapping rules (open)

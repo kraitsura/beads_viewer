@@ -31,6 +31,30 @@ const (
 	ViewTypeWorkstream ViewType = 1
 )
 
+// ScopeMode represents how multiple scope labels are combined
+type ScopeMode int
+
+const (
+	ScopeModeUnion        ScopeMode = iota // Issue appears if it has ANY of the scope labels
+	ScopeModeIntersection                  // Issue appears only if it has ALL scope labels
+)
+
+// String returns display string for scope mode
+func (s ScopeMode) String() string {
+	if s == ScopeModeIntersection {
+		return "Intersection (ALL)"
+	}
+	return "Union (ANY)"
+}
+
+// ShortString returns a short display string for scope mode
+func (s ScopeMode) ShortString() string {
+	if s == ScopeModeIntersection {
+		return "∩ ALL"
+	}
+	return "∪ ANY"
+}
+
 // String returns display string for depth
 func (d DepthOption) String() string {
 	if d == DepthAll {
@@ -41,13 +65,15 @@ func (d DepthOption) String() string {
 
 // LensTreeNode represents a node in the dependency tree
 type LensTreeNode struct {
-	Issue        model.Issue
-	IsPrimary    bool        // true if has the label
-	IsEntryEpic  bool        // true if this is the entry point epic (when viewing an epic)
-	Children     []*LensTreeNode // downstream issues (what this unblocks)
-	Depth        int         // depth in tree (0 = root)
-	IsLastChild  bool        // for rendering tree lines
-	ParentPath   []bool      // track which ancestors are last children (for tree lines)
+	Issue         model.Issue
+	IsPrimary     bool             // true if has the label
+	IsEntryEpic   bool             // true if this is the entry point epic (when viewing an epic)
+	Children      []*LensTreeNode  // downstream issues (what this unblocks)
+	Depth         int              // depth in tree (0 = root)
+	RelativeDepth int              // depth relative to entry point: -N upstream, 0 center, +N downstream
+	IsLastChild   bool             // for rendering tree lines
+	ParentPath    []bool           // track which ancestors are last children (for tree lines)
+	IsUpstream    bool             // true if this is a blocker of the entry point
 }
 
 // LensFlatNode is a flattened tree node for display/navigation
@@ -73,6 +99,12 @@ type LensDashboardModel struct {
 	primaryIDs  map[string]bool      // Issues that have the label (expanded via parent-child)
 	directPrimaryIDs map[string]bool // Issues that directly have the label (not expanded)
 	blockedByMap map[string]string   // issue ID -> blocking issue ID
+
+	// Ego-centered view (for epic/bead modes)
+	centeredMode  bool        // true = ego-centered layout, false = flat tree
+	upstreamNodes []LensFlatNode  // Blockers of the entry point (shown above)
+	egoNode       *LensFlatNode   // The entry point itself (center)
+	// roots/flatNodes used for downstream (shown below)
 
 	// Epic mode: depth-specific descendant maps
 	// For epic mode, depth semantics differ from label mode:
@@ -127,6 +159,14 @@ type LensDashboardModel struct {
 	width  int
 	height int
 	theme  Theme
+
+	// Scope filtering (multi-label selection)
+	scopeLabels []string  // Currently selected scope labels (empty = no scope)
+	scopeMode   ScopeMode // Union (ANY) or Intersection (ALL) mode
+
+	// Scope input modal
+	showScopeInput bool   // True when scope input modal is visible
+	scopeInput     string // Current text in scope input
 }
 
 // NewLensDashboardModel creates a new label dashboard for the given label
@@ -190,6 +230,7 @@ func NewBeadLensModel(issueID string, allIssues []model.Issue, issueMap map[stri
 		labelName:        issue.Title,
 		viewMode:         "bead",
 		epicID:           issueID, // Reuse epicID field for entry point
+		centeredMode:     true,    // Enable ego-centered view by default for bead mode
 		allIssues:        allIssues,
 		issueMap:         issueMap,
 		theme:            theme,
@@ -226,6 +267,7 @@ func NewEpicLensModel(epicID string, epicTitle string, allIssues []model.Issue, 
 		labelName:        epicTitle,
 		viewMode:         "epic",
 		epicID:           epicID,
+		centeredMode:     true, // Enable ego-centered view by default for epic mode
 		allIssues:        allIssues,
 		issueMap:         issueMap,
 		theme:            theme,
@@ -322,30 +364,37 @@ func buildEpicDescendantsByDepth(epicID string, issues []model.Issue) map[DepthO
 	}
 
 	// Build cumulative sets for each DepthOption
-	// Depth1 = level 1 only (direct children)
+	// IMPORTANT: Always include the entry epic itself at ALL depth levels
+	// This ensures the entry point is visible and highlighted in the view
+
+	// Depth1 = entry epic + direct children
 	result[Depth1] = make(map[string]bool)
+	result[Depth1][epicID] = true // Entry point always included
 	for id := range descendantsByLevel[1] {
 		result[Depth1][id] = true
 	}
 
-	// Depth2 = levels 1-2
+	// Depth2 = entry epic + levels 1-2
 	result[Depth2] = make(map[string]bool)
+	result[Depth2][epicID] = true // Entry point always included
 	for level := 1; level <= 2; level++ {
 		for id := range descendantsByLevel[level] {
 			result[Depth2][id] = true
 		}
 	}
 
-	// Depth3 = levels 1-3
+	// Depth3 = entry epic + levels 1-3
 	result[Depth3] = make(map[string]bool)
+	result[Depth3][epicID] = true // Entry point always included
 	for level := 1; level <= 3; level++ {
 		for id := range descendantsByLevel[level] {
 			result[Depth3][id] = true
 		}
 	}
 
-	// DepthAll = all levels
+	// DepthAll = entry epic + all levels
 	result[DepthAll] = make(map[string]bool)
+	result[DepthAll][epicID] = true // Entry point always included
 	for level := range descendantsByLevel {
 		for id := range descendantsByLevel[level] {
 			result[DepthAll][id] = true
@@ -513,30 +562,37 @@ func buildBeadDescendantsByDepth(beadID string, issues []model.Issue) map[DepthO
 	}
 
 	// Build cumulative sets for each DepthOption
-	// Depth1 = level 1 only (direct children + directly blocked)
+	// IMPORTANT: Always include the entry bead itself at ALL depth levels
+	// This ensures the entry point is visible and highlighted in the view
+
+	// Depth1 = entry bead + direct children + directly blocked
 	result[Depth1] = make(map[string]bool)
+	result[Depth1][beadID] = true // Entry point always included
 	for id := range descendantsByLevel[1] {
 		result[Depth1][id] = true
 	}
 
-	// Depth2 = levels 1-2
+	// Depth2 = entry bead + levels 1-2
 	result[Depth2] = make(map[string]bool)
+	result[Depth2][beadID] = true // Entry point always included
 	for level := 1; level <= 2; level++ {
 		for id := range descendantsByLevel[level] {
 			result[Depth2][id] = true
 		}
 	}
 
-	// Depth3 = levels 1-3
+	// Depth3 = entry bead + levels 1-3
 	result[Depth3] = make(map[string]bool)
+	result[Depth3][beadID] = true // Entry point always included
 	for level := 1; level <= 3; level++ {
 		for id := range descendantsByLevel[level] {
 			result[Depth3][id] = true
 		}
 	}
 
-	// DepthAll = all levels
+	// DepthAll = entry bead + all levels
 	result[DepthAll] = make(map[string]bool)
+	result[DepthAll][beadID] = true // Entry point always included
 	for level := range descendantsByLevel {
 		for id := range descendantsByLevel[level] {
 			result[DepthAll][id] = true
@@ -592,12 +648,20 @@ func (m *LensDashboardModel) buildGraphs() {
 func (m *LensDashboardModel) buildTree() {
 	m.roots = nil
 	m.flatNodes = nil
+	m.upstreamNodes = nil
+	m.egoNode = nil
 	m.totalCount = 0
 	m.primaryCount = 0
 	m.contextCount = 0
 	m.readyCount = 0
 	m.blockedCount = 0
 	m.closedCount = 0
+
+	// For epic/bead modes with centered view, use ego-centered tree building
+	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.epicID != "" {
+		m.buildEgoCenteredTree()
+		return
+	}
 
 	seen := make(map[string]bool)
 
@@ -991,7 +1055,269 @@ func (m *LensDashboardModel) flattenNode(node *LensTreeNode) {
 	}
 }
 
+// buildEgoCenteredTree builds a tree structure centered on the entry point (epic/bead).
+// Layout: Upstream blockers → Entry point (center) → Downstream descendants
+func (m *LensDashboardModel) buildEgoCenteredTree() {
+	entryIssue, exists := m.issueMap[m.epicID]
+	if !exists {
+		return
+	}
+
+	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
+	maxDepth := int(m.dependencyDepth)
+	if m.dependencyDepth == DepthAll {
+		maxDepth = 100
+	}
+
+	// Track what we've seen
+	seen := make(map[string]bool)
+
+	// 1. Build the ego/center node
+	egoTreeNode := &LensTreeNode{
+		Issue:         *entryIssue,
+		IsPrimary:     true,
+		IsEntryEpic:   true,
+		Depth:         0,
+		RelativeDepth: 0,
+		IsLastChild:   true,
+		ParentPath:    nil,
+	}
+	m.egoNode = &LensFlatNode{
+		Node:       egoTreeNode,
+		TreePrefix: "",
+		Status:     m.getIssueStatus(*entryIssue),
+		BlockedBy:  m.blockedByMap[entryIssue.ID],
+	}
+	seen[m.epicID] = true
+	m.totalCount++
+	m.primaryCount++
+	if m.egoNode.Status == "ready" {
+		m.readyCount++
+	} else if m.egoNode.Status == "blocked" {
+		m.blockedCount++
+	} else if m.egoNode.Status == "closed" {
+		m.closedCount++
+	}
+
+	// 2. Build upstream blockers (issues that block the entry point)
+	// These are shown ABOVE the center
+	m.upstreamNodes = nil
+	blockerIDs := m.upstream[m.epicID]
+	var blockerIssues []model.Issue
+	for _, blockerID := range blockerIDs {
+		if blocker, ok := m.issueMap[blockerID]; ok {
+			if blocker.Status != model.StatusClosed { // Only show open blockers
+				blockerIssues = append(blockerIssues, *blocker)
+			}
+		}
+	}
+
+	// Sort blockers by status then priority
+	sort.Slice(blockerIssues, func(i, j int) bool {
+		si := m.getStatusOrder(blockerIssues[i])
+		sj := m.getStatusOrder(blockerIssues[j])
+		if si != sj {
+			return si < sj
+		}
+		return blockerIssues[i].Priority < blockerIssues[j].Priority
+	})
+
+	for i, blocker := range blockerIssues {
+		if seen[blocker.ID] {
+			continue
+		}
+		seen[blocker.ID] = true
+
+		node := &LensTreeNode{
+			Issue:         blocker,
+			IsPrimary:     depthPrimaryIDs[blocker.ID],
+			IsEntryEpic:   false,
+			Depth:         0,
+			RelativeDepth: -1, // Upstream = negative depth
+			IsLastChild:   i == len(blockerIssues)-1,
+			IsUpstream:    true,
+		}
+
+		fn := LensFlatNode{
+			Node:       node,
+			TreePrefix: "",
+			Status:     m.getIssueStatus(blocker),
+			BlockedBy:  m.blockedByMap[blocker.ID],
+		}
+		m.upstreamNodes = append(m.upstreamNodes, fn)
+
+		m.totalCount++
+		if node.IsPrimary {
+			m.primaryCount++
+		} else {
+			m.contextCount++
+		}
+		if fn.Status == "ready" {
+			m.readyCount++
+		} else if fn.Status == "blocked" {
+			m.blockedCount++
+		} else if fn.Status == "closed" {
+			m.closedCount++
+		}
+	}
+
+	// 3. Build downstream tree (children and dependents)
+	// These are shown BELOW the center
+	m.roots = nil
+	m.flatNodes = nil
+
+	// Get all direct children/dependents of the entry point
+	downstreamIDs := m.downstream[m.epicID]
+	var downstreamIssues []model.Issue
+	for _, childID := range downstreamIDs {
+		if child, ok := m.issueMap[childID]; ok {
+			if !seen[childID] {
+				downstreamIssues = append(downstreamIssues, *child)
+			}
+		}
+	}
+
+	// Sort by status then priority
+	sort.Slice(downstreamIssues, func(i, j int) bool {
+		si := m.getStatusOrder(downstreamIssues[i])
+		sj := m.getStatusOrder(downstreamIssues[j])
+		if si != sj {
+			return si < sj
+		}
+		return downstreamIssues[i].Priority < downstreamIssues[j].Priority
+	})
+
+	// Build tree from each downstream issue
+	for i, issue := range downstreamIssues {
+		if seen[issue.ID] {
+			continue
+		}
+		isLast := i == len(downstreamIssues)-1
+		node := m.buildCenteredTreeNode(issue, 1, maxDepth, seen, isLast, nil, depthPrimaryIDs)
+		if node != nil {
+			m.roots = append(m.roots, node)
+		}
+	}
+
+	// Flatten downstream tree
+	for _, root := range m.roots {
+		m.flattenNode(root)
+	}
+
+	// Update selected issue
+	totalNodes := len(m.upstreamNodes) + 1 + len(m.flatNodes) // upstream + ego + downstream
+	if totalNodes > 0 {
+		// Default cursor to the ego node (after upstream section)
+		if m.cursor < 0 || m.cursor >= totalNodes {
+			m.cursor = len(m.upstreamNodes) // Point to ego node
+		}
+		m.selectedIssueID = m.getSelectedIDForCenteredMode()
+	}
+}
+
+// buildCenteredTreeNode builds a tree node with relative depth tracking
+func (m *LensDashboardModel) buildCenteredTreeNode(issue model.Issue, relDepth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, depthPrimaryIDs map[string]bool) *LensTreeNode {
+	if seen[issue.ID] {
+		return nil
+	}
+	seen[issue.ID] = true
+
+	node := &LensTreeNode{
+		Issue:         issue,
+		IsPrimary:     depthPrimaryIDs[issue.ID],
+		IsEntryEpic:   false,
+		Depth:         relDepth,
+		RelativeDepth: relDepth,
+		IsLastChild:   isLast,
+		ParentPath:    append([]bool{}, parentPath...),
+	}
+
+	// Update stats
+	m.totalCount++
+	if node.IsPrimary {
+		m.primaryCount++
+	} else {
+		m.contextCount++
+	}
+
+	status := m.getIssueStatus(issue)
+	switch status {
+	case "ready":
+		m.readyCount++
+	case "blocked":
+		m.blockedCount++
+	case "closed":
+		m.closedCount++
+	}
+
+	// Add children if within depth
+	if relDepth < maxDepth {
+		var childIssues []model.Issue
+		for _, childID := range m.downstream[issue.ID] {
+			if child, ok := m.issueMap[childID]; ok {
+				if !seen[childID] {
+					childIssues = append(childIssues, *child)
+				}
+			}
+		}
+
+		// Sort children by status then priority
+		sort.Slice(childIssues, func(i, j int) bool {
+			si := m.getStatusOrder(childIssues[i])
+			sj := m.getStatusOrder(childIssues[j])
+			if si != sj {
+				return si < sj
+			}
+			return childIssues[i].Priority < childIssues[j].Priority
+		})
+
+		newParentPath := append(parentPath, isLast)
+		for i, child := range childIssues {
+			childIsLast := i == len(childIssues)-1
+			childNode := m.buildCenteredTreeNode(child, relDepth+1, maxDepth, seen, childIsLast, newParentPath, depthPrimaryIDs)
+			if childNode != nil {
+				node.Children = append(node.Children, childNode)
+			}
+		}
+	}
+
+	return node
+}
+
+// getSelectedIDForCenteredMode returns the selected issue ID based on cursor position in centered mode
+func (m *LensDashboardModel) getSelectedIDForCenteredMode() string {
+	upstreamLen := len(m.upstreamNodes)
+
+	if m.cursor < upstreamLen {
+		// In upstream section
+		return m.upstreamNodes[m.cursor].Node.Issue.ID
+	} else if m.cursor == upstreamLen {
+		// On ego node
+		if m.egoNode != nil {
+			return m.egoNode.Node.Issue.ID
+		}
+		return ""
+	} else {
+		// In downstream section
+		downstreamIdx := m.cursor - upstreamLen - 1
+		if downstreamIdx < len(m.flatNodes) {
+			return m.flatNodes[downstreamIdx].Node.Issue.ID
+		}
+		return ""
+	}
+}
+
+// getTotalCenteredNodeCount returns total navigable nodes in centered mode
+func (m *LensDashboardModel) getTotalCenteredNodeCount() int {
+	egoCount := 0
+	if m.egoNode != nil {
+		egoCount = 1
+	}
+	return len(m.upstreamNodes) + egoCount + len(m.flatNodes)
+}
+
 // buildTreePrefix builds the tree line prefix for a node
+// Uses refined minimal connectors: ├─ └─ │
 func (m *LensDashboardModel) buildTreePrefix(node *LensTreeNode) string {
 	if node.Depth == 0 {
 		return ""
@@ -999,20 +1325,20 @@ func (m *LensDashboardModel) buildTreePrefix(node *LensTreeNode) string {
 
 	var prefix strings.Builder
 
-	// Build prefix from parent path
+	// Build prefix from parent path with refined spacing
 	for i := 0; i < len(node.ParentPath); i++ {
 		if node.ParentPath[i] {
-			prefix.WriteString("   ") // parent was last child, no line
+			prefix.WriteString("  ") // parent was last child, no line
 		} else {
-			prefix.WriteString("│  ") // parent has siblings, continue line
+			prefix.WriteString("│ ") // parent has siblings, continue line
 		}
 	}
 
-	// Add connector for this node
+	// Refined minimal connectors
 	if node.IsLastChild {
-		prefix.WriteString("└─►")
+		prefix.WriteString("└─")
 	} else {
-		prefix.WriteString("├─►")
+		prefix.WriteString("├─")
 	}
 
 	return prefix.String()
@@ -1073,6 +1399,29 @@ func (m *LensDashboardModel) CycleDepth() {
 
 	// Recompute workstreams with depth-appropriate primaryIDs
 	m.recomputeWorkstreams()
+}
+
+// ToggleCenteredMode toggles between ego-centered and flat view modes
+// Only applicable for epic/bead modes
+func (m *LensDashboardModel) ToggleCenteredMode() {
+	if m.viewMode != "epic" && m.viewMode != "bead" {
+		return // Only toggle for epic/bead modes
+	}
+
+	m.centeredMode = !m.centeredMode
+	m.cursor = 0 // Reset cursor when switching modes
+	m.scroll = 0
+
+	// Rebuild tree with new mode
+	m.buildTree()
+
+	// Recompute workstreams
+	m.recomputeWorkstreams()
+}
+
+// IsCenteredMode returns whether the dashboard is in ego-centered mode
+func (m *LensDashboardModel) IsCenteredMode() bool {
+	return m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead")
 }
 
 // GetPrimaryIDsForDepth returns the appropriate primaryIDs for the current depth.
@@ -1152,6 +1501,346 @@ func (m *LensDashboardModel) SetDepth(depth DepthOption) {
 	m.recomputeWorkstreams()
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// SCOPE MANAGEMENT - Multi-label filtering with union/intersection
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GetScopeLabels returns the currently selected scope labels
+func (m *LensDashboardModel) GetScopeLabels() []string {
+	return m.scopeLabels
+}
+
+// GetScopeMode returns the current scope mode (union or intersection)
+func (m *LensDashboardModel) GetScopeMode() ScopeMode {
+	return m.scopeMode
+}
+
+// HasScope returns true if scope filtering is active
+func (m *LensDashboardModel) HasScope() bool {
+	return len(m.scopeLabels) > 0
+}
+
+// AddScopeLabel adds a label to the scope (if not already present)
+func (m *LensDashboardModel) AddScopeLabel(label string) {
+	// Check if already in scope
+	for _, l := range m.scopeLabels {
+		if l == label {
+			return // Already present
+		}
+	}
+	m.scopeLabels = append(m.scopeLabels, label)
+	m.rebuildWithScope()
+}
+
+// RemoveScopeLabel removes a specific label from the scope
+func (m *LensDashboardModel) RemoveScopeLabel(label string) {
+	for i, l := range m.scopeLabels {
+		if l == label {
+			m.scopeLabels = append(m.scopeLabels[:i], m.scopeLabels[i+1:]...)
+			m.rebuildWithScope()
+			return
+		}
+	}
+}
+
+// RemoveLastScopeLabel removes the most recently added scope label
+func (m *LensDashboardModel) RemoveLastScopeLabel() bool {
+	if len(m.scopeLabels) == 0 {
+		return false
+	}
+	m.scopeLabels = m.scopeLabels[:len(m.scopeLabels)-1]
+	m.rebuildWithScope()
+	return true
+}
+
+// ClearScope clears all scope labels
+func (m *LensDashboardModel) ClearScope() {
+	m.scopeLabels = nil
+	m.rebuildWithScope()
+}
+
+// ToggleScopeMode toggles between union (ANY) and intersection (ALL) mode
+func (m *LensDashboardModel) ToggleScopeMode() {
+	if m.scopeMode == ScopeModeUnion {
+		m.scopeMode = ScopeModeIntersection
+	} else {
+		m.scopeMode = ScopeModeUnion
+	}
+	// Rebuild only if scope is active
+	if len(m.scopeLabels) > 0 {
+		m.rebuildWithScope()
+	}
+}
+
+// rebuildWithScope rebuilds primaryIDs based on scope and rebuilds tree
+func (m *LensDashboardModel) rebuildWithScope() {
+	// If no scope, reset to original behavior
+	if len(m.scopeLabels) == 0 {
+		// Reset primaryIDs based on view mode
+		if m.viewMode == "label" {
+			// Rebuild directPrimaryIDs from labelName
+			m.directPrimaryIDs = make(map[string]bool)
+			for _, issue := range m.allIssues {
+				for _, label := range issue.Labels {
+					if label == m.labelName {
+						m.directPrimaryIDs[issue.ID] = true
+						break
+					}
+				}
+			}
+			m.primaryIDs = expandToDescendants(m.directPrimaryIDs, m.allIssues)
+		}
+		// For epic/bead modes, scope doesn't change primary logic (epic children stay)
+	} else {
+		// Apply scope filtering
+		m.applyScopeFilter()
+	}
+
+	m.buildGraphs()
+	m.buildTree()
+	m.recomputeWorkstreams()
+}
+
+// applyScopeFilter filters primaryIDs to only include issues matching scope criteria
+func (m *LensDashboardModel) applyScopeFilter() {
+	if len(m.scopeLabels) == 0 {
+		return
+	}
+
+	// Build set of issues that match scope criteria
+	scopeMatchingIDs := make(map[string]bool)
+
+	for _, issue := range m.allIssues {
+		matches := m.issueMatchesScope(issue)
+		if matches {
+			scopeMatchingIDs[issue.ID] = true
+		}
+	}
+
+	// For label mode: intersection of original primaryIDs and scope-matching IDs
+	if m.viewMode == "label" {
+		// First get the original primary IDs (issues with the labelName)
+		originalPrimaryIDs := make(map[string]bool)
+		for _, issue := range m.allIssues {
+			for _, label := range issue.Labels {
+				if label == m.labelName {
+					originalPrimaryIDs[issue.ID] = true
+					break
+				}
+			}
+		}
+
+		// Intersect with scope matching
+		m.directPrimaryIDs = make(map[string]bool)
+		for id := range originalPrimaryIDs {
+			if scopeMatchingIDs[id] {
+				m.directPrimaryIDs[id] = true
+			}
+		}
+		m.primaryIDs = expandToDescendants(m.directPrimaryIDs, m.allIssues)
+	} else {
+		// For epic/bead modes, filter the existing primaryIDs
+		filteredPrimary := make(map[string]bool)
+		for id := range m.primaryIDs {
+			if scopeMatchingIDs[id] {
+				filteredPrimary[id] = true
+			}
+		}
+		// Always keep the entry point visible
+		if m.epicID != "" {
+			filteredPrimary[m.epicID] = true
+		}
+		m.primaryIDs = filteredPrimary
+	}
+}
+
+// issueMatchesScope checks if an issue matches the current scope criteria
+func (m *LensDashboardModel) issueMatchesScope(issue model.Issue) bool {
+	if len(m.scopeLabels) == 0 {
+		return true
+	}
+
+	// Build set of issue's labels for quick lookup
+	issueLabels := make(map[string]bool)
+	for _, label := range issue.Labels {
+		issueLabels[label] = true
+	}
+
+	if m.scopeMode == ScopeModeUnion {
+		// Union: issue has ANY of the scope labels
+		for _, scopeLabel := range m.scopeLabels {
+			if issueLabels[scopeLabel] {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Intersection: issue has ALL of the scope labels
+	for _, scopeLabel := range m.scopeLabels {
+		if !issueLabels[scopeLabel] {
+			return false
+		}
+	}
+	return true
+}
+
+// GetAvailableScopeLabels returns labels that co-occur with current scope
+// Useful for suggesting additional scope labels
+func (m *LensDashboardModel) GetAvailableScopeLabels() []string {
+	if len(m.scopeLabels) == 0 {
+		// Return all unique labels
+		labelSet := make(map[string]bool)
+		for _, issue := range m.allIssues {
+			for _, label := range issue.Labels {
+				labelSet[label] = true
+			}
+		}
+		var labels []string
+		for label := range labelSet {
+			labels = append(labels, label)
+		}
+		sort.Strings(labels)
+		return labels
+	}
+
+	// Return labels that co-occur with current scope (excluding already selected)
+	scopeSet := make(map[string]bool)
+	for _, l := range m.scopeLabels {
+		scopeSet[l] = true
+	}
+
+	cooccurring := make(map[string]int)
+	for _, issue := range m.allIssues {
+		if m.issueMatchesScope(issue) {
+			for _, label := range issue.Labels {
+				if !scopeSet[label] {
+					cooccurring[label]++
+				}
+			}
+		}
+	}
+
+	// Sort by count (descending)
+	type labelCount struct {
+		label string
+		count int
+	}
+	var sorted []labelCount
+	for label, count := range cooccurring {
+		sorted = append(sorted, labelCount{label, count})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].count > sorted[j].count
+	})
+
+	var result []string
+	for _, lc := range sorted {
+		result = append(result, lc.label)
+	}
+	return result
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SCOPE INPUT MODAL - Inline label input for scope filtering
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ShowScopeInput returns true if the scope input modal is visible
+func (m *LensDashboardModel) ShowScopeInput() bool {
+	return m.showScopeInput
+}
+
+// OpenScopeInput opens the scope input modal
+func (m *LensDashboardModel) OpenScopeInput() {
+	m.showScopeInput = true
+	m.scopeInput = ""
+}
+
+// CloseScopeInput closes the scope input modal
+func (m *LensDashboardModel) CloseScopeInput() {
+	m.showScopeInput = false
+	m.scopeInput = ""
+}
+
+// GetScopeInput returns the current scope input text
+func (m *LensDashboardModel) GetScopeInput() string {
+	return m.scopeInput
+}
+
+// HandleScopeInputKey handles a key press when the scope input modal is open
+// Returns true if the key was handled, false if modal should close
+func (m *LensDashboardModel) HandleScopeInputKey(key string) (handled bool, statusMsg string) {
+	switch key {
+	case "esc":
+		m.CloseScopeInput()
+		return true, "Scope input cancelled"
+	case "enter":
+		// Add the label to scope if it's a valid label
+		if m.scopeInput != "" {
+			label := strings.TrimSpace(m.scopeInput)
+			// Check if it's a valid label (exists in the data)
+			isValid := false
+			for _, issue := range m.allIssues {
+				for _, l := range issue.Labels {
+					if strings.EqualFold(l, label) {
+						label = l // Use exact case from data
+						isValid = true
+						break
+					}
+				}
+				if isValid {
+					break
+				}
+			}
+			if isValid {
+				// Check if already in scope
+				alreadyInScope := false
+				for _, l := range m.scopeLabels {
+					if l == label {
+						alreadyInScope = true
+						break
+					}
+				}
+				if !alreadyInScope {
+					m.AddScopeLabel(label)
+					m.CloseScopeInput()
+					return true, fmt.Sprintf("Added '%s' to scope (%s)", label, m.scopeMode.ShortString())
+				}
+				m.CloseScopeInput()
+				return true, fmt.Sprintf("'%s' already in scope", label)
+			}
+			m.scopeInput = ""
+			return true, fmt.Sprintf("Label '%s' not found", label)
+		}
+		m.CloseScopeInput()
+		return true, ""
+	case "backspace", "ctrl+h":
+		if len(m.scopeInput) > 0 {
+			m.scopeInput = m.scopeInput[:len(m.scopeInput)-1]
+		}
+		return true, ""
+	case "tab":
+		// Auto-complete with first matching label
+		if m.scopeInput != "" {
+			query := strings.ToLower(m.scopeInput)
+			for _, label := range m.GetAvailableScopeLabels() {
+				if strings.HasPrefix(strings.ToLower(label), query) {
+					m.scopeInput = label
+					return true, ""
+				}
+			}
+		}
+		return true, ""
+	default:
+		// Add printable characters to input
+		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+			m.scopeInput += key
+			return true, ""
+		}
+	}
+	return false, ""
+}
+
 // SetSize updates the dashboard dimensions
 func (m *LensDashboardModel) SetSize(width, height int) {
 	m.width = width
@@ -1164,6 +1853,17 @@ func (m *LensDashboardModel) MoveUp() {
 		m.moveUpWS()
 		return
 	}
+
+	// Handle centered mode navigation
+	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+		if m.cursor > 0 {
+			m.cursor--
+			m.selectedIssueID = m.getSelectedIDForCenteredMode()
+		}
+		return
+	}
+
+	// Standard flat view navigation
 	if m.cursor > 0 {
 		m.cursor--
 		m.selectedIssueID = m.flatNodes[m.cursor].Node.Issue.ID
@@ -1177,6 +1877,18 @@ func (m *LensDashboardModel) MoveDown() {
 		m.moveDownWS()
 		return
 	}
+
+	// Handle centered mode navigation
+	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+		totalNodes := m.getTotalCenteredNodeCount()
+		if m.cursor < totalNodes-1 {
+			m.cursor++
+			m.selectedIssueID = m.getSelectedIDForCenteredMode()
+		}
+		return
+	}
+
+	// Standard flat view navigation
 	if m.cursor < len(m.flatNodes)-1 {
 		m.cursor++
 		m.selectedIssueID = m.flatNodes[m.cursor].Node.Issue.ID
@@ -1593,6 +2305,14 @@ func (m *LensDashboardModel) IsWorkstreamExpanded(wsIdx int) bool {
 	return m.wsExpanded[wsIdx]
 }
 
+// ExpandWorkstream expands the current workstream (does nothing if already expanded)
+func (m *LensDashboardModel) ExpandWorkstream() {
+	if len(m.workstreams) == 0 {
+		return
+	}
+	m.wsExpanded[m.wsCursor] = true
+}
+
 // CurrentWorkstreamName returns the name of the currently selected workstream
 func (m *LensDashboardModel) CurrentWorkstreamName() string {
 	if len(m.workstreams) == 0 || m.wsCursor >= len(m.workstreams) {
@@ -1712,6 +2432,15 @@ func (m *LensDashboardModel) GoToTop() {
 		m.updateSelectedIssueFromWS()
 		return
 	}
+
+	// Centered mode
+	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+		m.cursor = 0
+		m.selectedIssueID = m.getSelectedIDForCenteredMode()
+		m.scroll = 0
+		return
+	}
+
 	// Flat view
 	if len(m.flatNodes) > 0 {
 		m.cursor = 0
@@ -1734,9 +2463,91 @@ func (m *LensDashboardModel) GoToBottom() {
 		m.updateSelectedIssueFromWS() // This calls ensureVisibleWS which handles scroll
 		return
 	}
+
+	// Centered mode
+	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+		totalNodes := m.getTotalCenteredNodeCount()
+		m.cursor = totalNodes - 1
+		m.selectedIssueID = m.getSelectedIDForCenteredMode()
+		return
+	}
+
 	// Flat view
 	if len(m.flatNodes) > 0 {
 		m.cursor = len(m.flatNodes) - 1
+		m.selectedIssueID = m.flatNodes[m.cursor].Node.Issue.ID
+		m.ensureVisible()
+	}
+}
+
+// PageDown moves cursor down by half a page
+func (m *LensDashboardModel) PageDown() {
+	pageSize := (m.height - 8) / 2
+	if pageSize < 3 {
+		pageSize = 3
+	}
+
+	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
+		// Move multiple issues down in workstream view
+		for i := 0; i < pageSize; i++ {
+			m.moveDownWS()
+		}
+		return
+	}
+
+	// Centered mode
+	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+		totalNodes := m.getTotalCenteredNodeCount()
+		m.cursor += pageSize
+		if m.cursor >= totalNodes {
+			m.cursor = totalNodes - 1
+		}
+		m.selectedIssueID = m.getSelectedIDForCenteredMode()
+		return
+	}
+
+	// Flat view
+	if len(m.flatNodes) > 0 {
+		m.cursor += pageSize
+		if m.cursor >= len(m.flatNodes) {
+			m.cursor = len(m.flatNodes) - 1
+		}
+		m.selectedIssueID = m.flatNodes[m.cursor].Node.Issue.ID
+		m.ensureVisible()
+	}
+}
+
+// PageUp moves cursor up by half a page
+func (m *LensDashboardModel) PageUp() {
+	pageSize := (m.height - 8) / 2
+	if pageSize < 3 {
+		pageSize = 3
+	}
+
+	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
+		// Move multiple issues up in workstream view
+		for i := 0; i < pageSize; i++ {
+			m.moveUpWS()
+		}
+		return
+	}
+
+	// Centered mode
+	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+		m.cursor -= pageSize
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		m.selectedIssueID = m.getSelectedIDForCenteredMode()
+		return
+	}
+
+	// Flat view
+	if len(m.flatNodes) > 0 {
+		m.cursor -= pageSize
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
 		m.selectedIssueID = m.flatNodes[m.cursor].Node.Issue.ID
 		m.ensureVisible()
 	}
@@ -1933,6 +2744,59 @@ func (m *LensDashboardModel) View() string {
 		blockedStyle.Render(fmt.Sprintf("%d", m.blockedCount)),
 		inProgStyle.Render(fmt.Sprintf("%d", m.totalCount-m.readyCount-m.blockedCount-m.closedCount)))
 	lines = append(lines, statsStyle.Render(summaryLine))
+
+	// Scope indicator (if scope is active)
+	if len(m.scopeLabels) > 0 {
+		scopeStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+		modeStyle := t.Renderer.NewStyle().Foreground(t.InProgress)
+		tagStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+
+		// Build scope tags
+		var tags []string
+		for _, label := range m.scopeLabels {
+			tags = append(tags, tagStyle.Render("["+label+"]"))
+		}
+
+		// Mode indicator
+		modeIndicator := m.scopeMode.ShortString()
+
+		scopeLine := scopeStyle.Render("Scope: ") + strings.Join(tags, " ") + "  " + modeStyle.Render(modeIndicator)
+		lines = append(lines, scopeLine)
+	}
+
+	// Scope input field (inline, appears when adding scope)
+	if m.showScopeInput {
+		inputStyle := t.Renderer.NewStyle().Foreground(t.Primary)
+		promptStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+		hintStyle := t.Renderer.NewStyle().Faint(true)
+
+		inputLine := promptStyle.Render("+ Scope: ") + inputStyle.Render(m.scopeInput) + inputStyle.Render("█")
+		lines = append(lines, inputLine)
+
+		// Show matching labels on separate line to avoid breaking layout
+		if m.scopeInput != "" {
+			query := strings.ToLower(m.scopeInput)
+			var matches []string
+			for _, label := range m.GetAvailableScopeLabels() {
+				if strings.Contains(strings.ToLower(label), query) {
+					matches = append(matches, label)
+					if len(matches) >= 5 {
+						break
+					}
+				}
+			}
+			if len(matches) > 0 {
+				// Truncate matches to fit width
+				matchText := strings.Join(matches, ", ")
+				maxLen := contentWidth - 6
+				if maxLen > 0 && len(matchText) > maxLen {
+					matchText = matchText[:maxLen-3] + "..."
+				}
+				lines = append(lines, hintStyle.Render("  → "+matchText))
+			}
+		}
+	}
+
 	lines = append(lines, "")
 
 	// Calculate visible area
@@ -1945,6 +2809,9 @@ func (m *LensDashboardModel) View() string {
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		// Render workstream view
 		lines = append(lines, m.renderWorkstreamView(contentWidth, visibleLines, statsStyle)...)
+	} else if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+		// Render ego-centered view for epic/bead modes
+		lines = append(lines, m.renderCenteredView(contentWidth, visibleLines, statsStyle)...)
 	} else {
 		// Render flat tree view
 		if len(m.flatNodes) == 0 {
@@ -1991,21 +2858,252 @@ func (m *LensDashboardModel) View() string {
 	navHint := "n/N: section"
 	enterHint := "enter: focus"
 	treeHint := ""
+	centeredHint := ""
+	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") {
+		viewIndicator = "[centered]"
+		centeredHint = " • c: flat"
+	} else if m.viewMode == "epic" || m.viewMode == "bead" {
+		centeredHint = " • c: centered"
+	}
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		viewIndicator = fmt.Sprintf("[%d streams]", m.workstreamCount)
 		toggleHint = "w: flat"
 		navHint = "n/N: stream"
 		enterHint = "enter: expand"
 		if m.wsTreeView {
-			treeHint = " • D: list • d: depth"
+			treeHint = " • T: list • d: depth"
 		} else {
-			treeHint = " • d: tree"
+			treeHint = " • T: tree • d: depth"
 		}
 	}
 
-	lines = append(lines, footerStyle.Render(fmt.Sprintf("%s • j/k: nav • g/G: top/bottom • %s • %s • %s%s • esc: back", viewIndicator, toggleHint, navHint, enterHint, treeHint)))
+	lines = append(lines, footerStyle.Render(fmt.Sprintf("%s • j/k: nav • g/G: top/bottom • %s • %s • %s%s%s • esc: back", viewIndicator, toggleHint, navHint, enterHint, treeHint, centeredHint)))
 
 	return strings.Join(lines, "\n")
+}
+
+// renderCenteredView renders the ego-centered layout for epic/bead modes:
+// Upstream blockers → Entry point (center) → Downstream descendants
+func (m *LensDashboardModel) renderCenteredView(contentWidth, visibleLines int, statsStyle lipgloss.Style) []string {
+	t := m.theme
+	var allLines []string
+
+	upstreamLen := len(m.upstreamNodes)
+	totalNodes := m.getTotalCenteredNodeCount()
+
+	// Elegant section header styles with gradient colors
+	upstreamIconStyle := t.Renderer.NewStyle().Foreground(t.Blocked).Bold(true)
+	downstreamIconStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+	sectionLabelStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Bold(true)
+	separatorStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
+	boxStyle := t.Renderer.NewStyle().Foreground(t.Primary)
+
+	// Helper to render elegant header with decorative line
+	renderSectionHeader := func(icon, iconStyled, label string, lineWidth int) string {
+		lineLen := lineWidth - len(icon) - len(label) - 2
+		if lineLen < 5 {
+			lineLen = 5
+		}
+		line := strings.Repeat("─", lineLen)
+		return iconStyled + " " + sectionLabelStyle.Render(label) + " " + separatorStyle.Render(line)
+	}
+
+	// === UPSTREAM SECTION (blockers) ===
+	if len(m.upstreamNodes) > 0 {
+		header := renderSectionHeader("◇", upstreamIconStyle.Render("◇"), "BLOCKERS", min(contentWidth, 50))
+		allLines = append(allLines, header)
+
+		for i, fn := range m.upstreamNodes {
+			isSelected := i == m.cursor
+			line := m.renderCenteredNode(fn, isSelected, contentWidth, -1)
+			allLines = append(allLines, line)
+		}
+		allLines = append(allLines, "")
+	}
+
+	// === CENTER SECTION (entry point/ego) with elegant top/bottom lines ===
+	if m.egoNode != nil {
+		// Simple elegant lines - no side borders
+		lineWidth := min(contentWidth-4, 50)
+		topLine := boxStyle.Render("═" + strings.Repeat("═", lineWidth) + "═")
+		bottomLine := boxStyle.Render("─" + strings.Repeat("─", lineWidth) + "─")
+
+		allLines = append(allLines, topLine)
+
+		isSelected := m.cursor == upstreamLen
+		line := m.renderEgoNodeLine(*m.egoNode, isSelected, contentWidth)
+		allLines = append(allLines, line)
+
+		allLines = append(allLines, bottomLine)
+		allLines = append(allLines, "")
+	}
+
+	// === DOWNSTREAM SECTION (children/dependents) ===
+	if len(m.flatNodes) > 0 {
+		header := renderSectionHeader("◆", downstreamIconStyle.Render("◆"), "DESCENDANTS", min(contentWidth, 50))
+		allLines = append(allLines, header)
+
+		lastStatus := ""
+		for i, fn := range m.flatNodes {
+			// Calculate actual cursor position (offset by upstream + ego)
+			cursorPos := upstreamLen + 1 + i
+			isSelected := cursorPos == m.cursor
+
+			// Show status header when status changes
+			if fn.Status != lastStatus {
+				statusHeader := m.renderStatusHeader(fn.Status)
+				allLines = append(allLines, statusHeader)
+				lastStatus = fn.Status
+			}
+
+			line := m.renderCenteredNode(fn, isSelected, contentWidth, fn.Node.RelativeDepth)
+			allLines = append(allLines, line)
+		}
+	} else if len(m.upstreamNodes) == 0 {
+		emptyStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Italic(true)
+		allLines = append(allLines, emptyStyle.Render("  No descendants found"))
+	}
+
+	// Show scroll indicator if needed
+	if totalNodes > visibleLines {
+		scrollInfo := fmt.Sprintf("  [cursor %d of %d]", m.cursor+1, totalNodes)
+		allLines = append(allLines, statsStyle.Render(scrollInfo))
+	}
+
+	return allLines
+}
+
+// renderEgoNodeLine renders the center/ego node with prominent styling
+// No [CENTER] badge - the framed box already indicates this is the center
+func (m *LensDashboardModel) renderEgoNodeLine(fn LensFlatNode, isSelected bool, maxWidth int) string {
+	t := m.theme
+	node := fn.Node
+
+	// Selection indicator
+	selectPrefix := "  "
+	if isSelected {
+		selectPrefix = "▸ "
+	}
+
+	// Diamond icon for center - elegant ◈ instead of filled ◆
+	indicator := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true).Render("◈")
+
+	// Issue ID and title with prominent styling
+	idStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+	titleStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+
+	// Calculate max title length (more room without badge)
+	prefixLen := len(selectPrefix) + 2 + len(node.Issue.ID) + 3
+	maxTitleLen := maxWidth - prefixLen
+	if maxTitleLen < 15 {
+		maxTitleLen = 15
+	}
+	title := truncateRunesHelper(node.Issue.Title, maxTitleLen, "…")
+
+	// Status indicator
+	statusSuffix := ""
+	if fn.Status == "blocked" && fn.BlockedBy != "" {
+		blockerStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
+		statusSuffix = blockerStyle.Render(" ◄ " + fn.BlockedBy)
+	}
+
+	return fmt.Sprintf("%s%s %s %s%s",
+		selectPrefix,
+		indicator,
+		idStyle.Render(node.Issue.ID),
+		titleStyle.Render(title),
+		statusSuffix)
+}
+
+// renderCenteredNode renders a node with elegant depth-based styling
+func (m *LensDashboardModel) renderCenteredNode(fn LensFlatNode, isSelected bool, maxWidth int, relDepth int) string {
+	t := m.theme
+	node := fn.Node
+
+	// Selection indicator
+	selectPrefix := "  "
+	if isSelected {
+		selectPrefix = "▸ "
+	}
+
+	// Primary/context indicator - use smaller ▴ for upstream blockers
+	var indicator string
+	if node.IsUpstream {
+		// Upstream blocker - use smaller up triangle
+		indicator = t.Renderer.NewStyle().Foreground(t.Blocked).Render("▴")
+	} else if node.IsPrimary {
+		indicator = t.Renderer.NewStyle().Foreground(t.Primary).Render("●")
+	} else {
+		indicator = t.Renderer.NewStyle().Foreground(t.Secondary).Render("○")
+	}
+
+	// Tree prefix (styled dimmer)
+	treePrefix := ""
+	if fn.TreePrefix != "" {
+		treePrefix = t.Renderer.NewStyle().Foreground(t.Subtext).Render(fn.TreePrefix) + " "
+	}
+
+	// Gradient depth coloring: deeper nodes fade toward subtext
+	// Depth 1 = full color, Depth 2+ = progressively dimmer
+	idStyle := t.Renderer.NewStyle()
+	titleStyle := t.Renderer.NewStyle()
+
+	absDepth := relDepth
+	if absDepth < 0 {
+		absDepth = -absDepth
+	}
+
+	if isSelected {
+		idStyle = idStyle.Foreground(t.Primary).Bold(true)
+		titleStyle = titleStyle.Foreground(t.Primary).Bold(true)
+	} else if node.IsUpstream {
+		idStyle = idStyle.Foreground(t.Blocked)
+		titleStyle = titleStyle.Foreground(t.Blocked)
+	} else if absDepth >= 3 {
+		// Deep nodes (depth 3+): dimmer subtext color
+		idStyle = idStyle.Foreground(t.Subtext)
+		titleStyle = titleStyle.Foreground(t.Subtext)
+	} else if absDepth == 2 {
+		// Medium depth: secondary/subdued color
+		if node.IsPrimary {
+			idStyle = idStyle.Foreground(t.Secondary)
+			titleStyle = titleStyle.Foreground(t.Secondary)
+		} else {
+			idStyle = idStyle.Foreground(t.Subtext)
+			titleStyle = titleStyle.Foreground(t.Subtext)
+		}
+	} else if !node.IsPrimary {
+		// Depth 1, context node
+		idStyle = idStyle.Foreground(t.Subtext)
+		titleStyle = titleStyle.Foreground(t.Subtext)
+	} else {
+		// Depth 1, primary node: full brightness
+		idStyle = idStyle.Foreground(t.Base.GetForeground())
+		titleStyle = titleStyle.Foreground(t.Base.GetForeground())
+	}
+
+	// Calculate max title length (no depth badge = more room for title)
+	prefixLen := len(selectPrefix) + 2 + len(fn.TreePrefix) + len(node.Issue.ID) + 3
+	maxTitleLen := maxWidth - prefixLen
+	if maxTitleLen < 15 {
+		maxTitleLen = 15
+	}
+	title := truncateRunesHelper(node.Issue.Title, maxTitleLen, "…")
+
+	// Status indicator for blocked items
+	statusSuffix := ""
+	if fn.Status == "blocked" && fn.BlockedBy != "" {
+		blockerStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
+		statusSuffix = blockerStyle.Render(" ◄ " + fn.BlockedBy)
+	}
+
+	return fmt.Sprintf("%s%s %s%s %s%s",
+		selectPrefix,
+		indicator,
+		treePrefix,
+		idStyle.Render(node.Issue.ID),
+		titleStyle.Render(title),
+		statusSuffix)
 }
 
 // renderWorkstreamView renders issues grouped by workstream
@@ -2079,7 +3177,7 @@ func (m *LensDashboardModel) renderWorkstreamView(contentWidth, visibleLines int
 				subProgress := int(subWs.Progress * 100)
 				subStatusCounts := fmt.Sprintf("○%d ●%d ◈%d ✓%d",
 					subWs.ReadyCount, subWs.InProgressCount, subWs.BlockedCount, subWs.ClosedCount)
-				subLine := fmt.Sprintf("      %s (%d%%) %s",
+				subLine := fmt.Sprintf("     %s (%d%%) %s",
 					wsSubStyle.Render("├─ "+subWs.Name),
 					subProgress,
 					wsSubStyle.Render(subStatusCounts))
@@ -2297,7 +3395,7 @@ func (m *LensDashboardModel) renderMiniProgressBar(progress float64, width int) 
 	return t.Renderer.NewStyle().Foreground(barColor).Render("[" + bar + "]")
 }
 
-// renderStatusHeader renders a status section header
+// renderStatusHeader renders a status section header with elegant dotted dividers
 func (m *LensDashboardModel) renderStatusHeader(status string) string {
 	t := m.theme
 
@@ -2322,8 +3420,16 @@ func (m *LensDashboardModel) renderStatusHeader(status string) string {
 		label = strings.ToUpper(status)
 	}
 
-	style := t.Renderer.NewStyle().Foreground(color).Bold(true)
-	return style.Render(label)
+	// Elegant dotted divider: ┄ LABEL ┄┄┄┄┄┄
+	labelStyle := t.Renderer.NewStyle().Foreground(color).Bold(true)
+	dividerStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
+
+	dotCount := 20 - len(label)
+	if dotCount < 3 {
+		dotCount = 3
+	}
+
+	return dividerStyle.Render("┄ ") + labelStyle.Render(label) + " " + dividerStyle.Render(strings.Repeat("┄", dotCount))
 }
 
 // renderTreeNode renders a single tree node

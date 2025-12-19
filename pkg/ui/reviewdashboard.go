@@ -5,10 +5,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/ansi"
+	reflowtrunc "github.com/muesli/reflow/truncate"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/loader"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
+	"github.com/Dicklesworthstone/beads_viewer/pkg/review"
 )
 
 // ReviewFlatNode represents a single node in the flattened tree for display
@@ -58,6 +62,7 @@ type ReviewDashboardModel struct {
 	// Quit state
 	showSummary bool
 	quitting    bool
+	saveOnQuit  bool
 
 	// Assignee input
 	showAssigneeInput bool
@@ -74,10 +79,14 @@ type ReviewDashboardModel struct {
 	showLabelInput bool
 	labelInput     string
 	activeLabels   []string
+
+	// Review persistence
+	collector     *review.ReviewActionCollector
+	workspaceRoot string
 }
 
 // NewReviewDashboardModel creates a new review dashboard
-func NewReviewDashboardModel(rootID string, issues []model.Issue, reviewer string, reviewType string, theme Theme) (*ReviewDashboardModel, error) {
+func NewReviewDashboardModel(rootID string, issues []model.Issue, reviewer string, reviewType string, theme Theme, workspaceRoot string) (*ReviewDashboardModel, error) {
 	tree, err := loader.LoadReviewTree(rootID, issues)
 	if err != nil {
 		return nil, err
@@ -90,6 +99,8 @@ func NewReviewDashboardModel(rootID string, issues []model.Issue, reviewer strin
 		theme:          theme,
 		showFilter:     "all",
 		sessionStarted: time.Now(),
+		collector:      review.NewReviewActionCollector(reviewer, reviewType),
+		workspaceRoot:  workspaceRoot,
 	}
 
 	m.rebuildFlatNodes()
@@ -223,6 +234,39 @@ func (m *ReviewDashboardModel) Init() tea.Cmd {
 
 // Update implements tea.Model
 func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.Cmd) {
+	// Handle summary screen
+	if m.showSummary {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "q":
+				// Save and quit
+				m.saveOnQuit = true
+				m.quitting = true
+				return m, tea.Quit
+			case "Q":
+				// Discard and quit (don't save)
+				m.quitting = true
+				return m, tea.Quit
+			case "esc":
+				m.showSummary = false
+			case "p":
+				// Copy simple summary to clipboard
+				prompt := m.generateSimplePrompt()
+				if err := clipboard.WriteAll(prompt); err == nil {
+					// Success - could show feedback but we're quitting anyway
+				}
+			case "P":
+				// Copy full review prompt with instructions
+				prompt := m.generateFullPrompt()
+				if err := clipboard.WriteAll(prompt); err == nil {
+					// Success
+				}
+			}
+		}
+		return m, nil
+	}
+
 	// Handle help overlay
 	if m.showHelp {
 		switch msg := msg.(type) {
@@ -372,6 +416,8 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 						m.itemsReviewed++
 						m.itemsNeedsRevision++
 					}
+					// Record for persistence
+					m.collector.Record(issue.ID, model.ReviewStatusNeedsRevision, note)
 				case "defer":
 					issue.ReviewStatus = model.ReviewStatusDeferred
 					issue.ReviewedBy = m.reviewer
@@ -380,6 +426,8 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 						m.itemsReviewed++
 						m.itemsDeferred++
 					}
+					// Record for persistence
+					m.collector.Record(issue.ID, model.ReviewStatusDeferred, note)
 				// "note" action doesn't change status
 				}
 			}
@@ -460,6 +508,8 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 					m.itemsReviewed++
 					m.itemsApproved++
 				}
+				// Record for persistence
+				m.collector.Record(issue.ID, model.ReviewStatusApproved, "")
 			}
 		case "r":
 			// Request revision - opens note modal
@@ -497,18 +547,14 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 				m.assigneeInput = issue.Assignee // Pre-fill with current assignee
 				m.showAssigneeInput = true
 			}
-		case "q":
-			if m.showSummary {
-				// Already showing summary, confirm quit
+		case "q", "esc":
+			// Only show summary if changes were made
+			if m.itemsReviewed > 0 {
+				m.showSummary = true
+			} else {
+				// No changes - quit directly
 				m.quitting = true
 				return m, tea.Quit
-			}
-			// Show summary first
-			m.showSummary = true
-		case "esc":
-			if m.showSummary {
-				// Cancel quit, go back to dashboard
-				m.showSummary = false
 			}
 		}
 	}
@@ -649,27 +695,28 @@ func (m *ReviewDashboardModel) View() string {
 
 // renderSummary renders the session summary screen
 func (m *ReviewDashboardModel) renderSummary() string {
+	t := m.theme
 	var b strings.Builder
 	duration := time.Since(m.sessionStarted).Round(time.Second)
 
 	// Header
-	headerStyle := m.theme.Renderer.NewStyle().Bold(true).Foreground(m.theme.Primary)
+	headerStyle := t.Renderer.NewStyle().Bold(true).Foreground(t.Primary)
 	b.WriteString(headerStyle.Render("Review Session Summary") + "\n")
 	b.WriteString(strings.Repeat("─", 40) + "\n\n")
 
 	// Session info
-	infoStyle := m.theme.Renderer.NewStyle().Foreground(m.theme.Subtext)
+	infoStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
 	b.WriteString(infoStyle.Render(fmt.Sprintf("Root:     %s", m.tree.Root.ID)) + "\n")
 	b.WriteString(infoStyle.Render(fmt.Sprintf("Reviewer: %s", m.reviewer)) + "\n")
 	b.WriteString(infoStyle.Render(fmt.Sprintf("Duration: %s", duration)) + "\n\n")
 
 	// Stats
-	statsHeaderStyle := m.theme.Renderer.NewStyle().Bold(true)
+	statsHeaderStyle := t.Renderer.NewStyle().Bold(true)
 	b.WriteString(statsHeaderStyle.Render("Items Reviewed:") + "\n")
 
-	approvedStyle := m.theme.Renderer.NewStyle().Foreground(m.theme.Open)
-	revisionStyle := m.theme.Renderer.NewStyle().Foreground(m.theme.Blocked)
-	deferredStyle := m.theme.Renderer.NewStyle().Foreground(m.theme.Subtext)
+	approvedStyle := t.Renderer.NewStyle().Foreground(t.Open)
+	revisionStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
+	deferredStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
 
 	b.WriteString(fmt.Sprintf("  Total:          %d\n", m.itemsReviewed))
 	b.WriteString(approvedStyle.Render(fmt.Sprintf("  ✓ Approved:     %d", m.itemsApproved)) + "\n")
@@ -692,10 +739,23 @@ func (m *ReviewDashboardModel) renderSummary() string {
 	b.WriteString(fmt.Sprintf("  %d/%d items reviewed (%d%%)\n\n", reviewed, total, pct))
 
 	// Hints
-	hintStyle := m.theme.Renderer.NewStyle().Faint(true)
-	b.WriteString(hintStyle.Render("[q] Quit  [Esc] Continue reviewing"))
+	hintStyle := t.Renderer.NewStyle().Faint(true)
+	keyStyle := t.Renderer.NewStyle().Foreground(t.Primary)
+	b.WriteString(keyStyle.Render("q") + hintStyle.Render(" save & quit  "))
+	b.WriteString(keyStyle.Render("Q") + hintStyle.Render(" discard & quit\n"))
+	b.WriteString(keyStyle.Render("p") + hintStyle.Render(" copy ID list  "))
+	b.WriteString(keyStyle.Render("P") + hintStyle.Render(" fix issues\n"))
+	b.WriteString(keyStyle.Render("Esc") + hintStyle.Render(" continue reviewing"))
 
-	return b.String()
+	// Wrap in centered box (same style as LabelTreeReviewModel)
+	boxStyle := t.Renderer.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Primary).
+		Padding(1, 2).
+		Width(55)
+
+	content := boxStyle.Render(b.String())
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
 // renderHelp renders the help overlay
@@ -757,16 +817,15 @@ func (m *ReviewDashboardModel) renderHelp() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
-// renderModalOverlay renders a modal centered over the base view
+// renderModalOverlay renders a modal centered over the base view, preserving the background
 func (m *ReviewDashboardModel) renderModalOverlay(base, modal string) string {
-	// Use lipgloss.Place to center the modal
 	modalWidth := lipgloss.Width(modal)
 	modalHeight := lipgloss.Height(modal)
 
-	// Create a semi-transparent background effect by dimming the base
 	baseLines := strings.Split(base, "\n")
+	modalLines := strings.Split(modal, "\n")
 
-	// Calculate modal position
+	// Calculate centered position
 	startRow := (m.height - modalHeight) / 2
 	startCol := (m.width - modalWidth) / 2
 	if startRow < 0 {
@@ -776,19 +835,88 @@ func (m *ReviewDashboardModel) renderModalOverlay(base, modal string) string {
 		startCol = 0
 	}
 
-	modalLines := strings.Split(modal, "\n")
-
-	// Overlay modal onto base
+	// Overlay modal onto base, preserving left and right portions
 	for i, modalLine := range modalLines {
 		row := startRow + i
 		if row >= 0 && row < len(baseLines) {
-			// Pad modal line placement
-			newLine := strings.Repeat(" ", startCol) + modalLine
-			baseLines[row] = newLine
+			baseLine := baseLines[row]
+			baseLineWidth := ansi.PrintableRuneWidth(baseLine)
+			modalLineWidth := ansi.PrintableRuneWidth(modalLine)
+
+			var newLine strings.Builder
+
+			// Left portion: truncate base to startCol
+			if startCol > 0 {
+				if baseLineWidth >= startCol {
+					newLine.WriteString(reflowtrunc.String(baseLine, uint(startCol)))
+				} else {
+					// Base line is shorter than startCol, pad with spaces
+					newLine.WriteString(baseLine)
+					newLine.WriteString(strings.Repeat(" ", startCol-baseLineWidth))
+				}
+			}
+
+			// Modal content
+			newLine.WriteString(modalLine)
+
+			// Right portion: skip past modal and get remaining base content
+			rightStart := startCol + modalLineWidth
+			if rightStart < baseLineWidth {
+				// Get the portion of baseLine after rightStart
+				// reflowtrunc.String gives us up to N chars, so we truncate to rightStart then take the rest
+				skipped := reflowtrunc.String(baseLine, uint(rightStart))
+				skippedWidth := ansi.PrintableRuneWidth(skipped)
+				if skippedWidth < len(baseLine) {
+					// Find where in the original string the truncation ended
+					remainder := cutAfterWidth(baseLine, rightStart)
+					newLine.WriteString(remainder)
+				}
+			}
+
+			baseLines[row] = newLine.String()
 		}
 	}
 
 	return strings.Join(baseLines, "\n")
+}
+
+// cutAfterWidth returns the portion of s after the first width visible characters
+func cutAfterWidth(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+
+	visible := 0
+	inEscape := false
+	bytePos := 0
+
+	for i, r := range s {
+		if visible >= width && !inEscape {
+			bytePos = i
+			break
+		}
+
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+
+		if inEscape {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+
+		visible++
+		bytePos = i + len(string(r))
+	}
+
+	if bytePos >= len(s) {
+		return ""
+	}
+
+	return s[bytePos:]
 }
 
 // renderAssigneeInput renders the assignee input modal
@@ -1660,6 +1788,127 @@ func (m *ReviewDashboardModel) Tree() *loader.ReviewTree {
 // SessionStats returns the current session statistics
 func (m *ReviewDashboardModel) SessionStats() (started time.Time, reviewed, approved, needsRevision, deferred int) {
 	return m.sessionStarted, m.itemsReviewed, m.itemsApproved, m.itemsNeedsRevision, m.itemsDeferred
+}
+
+// ShouldSave returns true if the user requested to save on quit
+func (m *ReviewDashboardModel) ShouldSave() bool {
+	return m.saveOnQuit
+}
+
+// SaveReviews persists all collected review actions to beads
+func (m *ReviewDashboardModel) SaveReviews() *review.ReviewSaveResult {
+	if m.collector.Count() == 0 {
+		return &review.ReviewSaveResult{Saved: 0, Failed: 0, Errors: nil}
+	}
+
+	saver, _ := review.NewReviewSaver(m.workspaceRoot)
+	defer saver.Close()
+
+	actions := m.collector.Actions()
+	saved, errors := saver.Save(actions)
+
+	return &review.ReviewSaveResult{
+		Saved:  saved,
+		Failed: len(actions) - saved,
+		Errors: errors,
+	}
+}
+
+// PendingSaveCount returns the number of reviews pending save
+func (m *ReviewDashboardModel) PendingSaveCount() int {
+	return m.collector.Count()
+}
+
+// WorkspaceRoot returns the workspace root path
+func (m *ReviewDashboardModel) WorkspaceRoot() string {
+	return m.workspaceRoot
+}
+
+// generateSimplePrompt creates a simple summary of reviewed beads and their status
+func (m *ReviewDashboardModel) generateSimplePrompt() string {
+	actions := m.collector.Actions()
+	if len(actions) == 0 {
+		return "No reviews recorded in this session."
+	}
+
+	var b strings.Builder
+	b.WriteString("# Review Session Summary\n\n")
+	b.WriteString(fmt.Sprintf("Reviewed %d issues:\n\n", len(actions)))
+
+	for _, action := range actions {
+		statusEmoji := "✓"
+		switch action.Status {
+		case model.ReviewStatusApproved:
+			statusEmoji = "✓"
+		case model.ReviewStatusNeedsRevision:
+			statusEmoji = "!"
+		case model.ReviewStatusDeferred:
+			statusEmoji = "?"
+		}
+		b.WriteString(fmt.Sprintf("- %s %s → %s\n", statusEmoji, action.IssueID, action.Status))
+	}
+
+	return b.String()
+}
+
+// generateFullPrompt creates a detailed prompt for agents to act on reviews
+func (m *ReviewDashboardModel) generateFullPrompt() string {
+	actions := m.collector.Actions()
+	if len(actions) == 0 {
+		return "No reviews recorded in this session."
+	}
+
+	var b strings.Builder
+	b.WriteString("# Review Session - Action Required\n\n")
+	b.WriteString("The following issues have been reviewed and require updates.\n")
+	b.WriteString("Please update each bead based on its review status and notes.\n\n")
+	b.WriteString("---\n\n")
+
+	for _, action := range actions {
+		b.WriteString(fmt.Sprintf("## %s\n\n", action.IssueID))
+		b.WriteString(fmt.Sprintf("**Review Status:** %s\n", action.Status))
+
+		// Add issue context if available
+		if issue := m.findIssueByID(action.IssueID); issue != nil {
+			b.WriteString(fmt.Sprintf("**Title:** %s\n", issue.Title))
+			b.WriteString(fmt.Sprintf("**Type:** %s | **Priority:** %d\n", issue.IssueType, issue.Priority))
+		}
+
+		if action.Notes != "" {
+			b.WriteString(fmt.Sprintf("\n**Review Notes:**\n%s\n", action.Notes))
+		}
+
+		// Add recommended action based on status
+		b.WriteString("\n**Recommended Action:**\n")
+		switch action.Status {
+		case model.ReviewStatusApproved:
+			b.WriteString("- Issue approved. Mark as ready for implementation or close if complete.\n")
+			b.WriteString(fmt.Sprintf("- Run: `bd update %s --status=in_progress` to begin work, or `bd close %s` if done.\n", action.IssueID, action.IssueID))
+		case model.ReviewStatusNeedsRevision:
+			b.WriteString("- Issue needs revision based on review feedback.\n")
+			b.WriteString("- Address the review notes above, then re-submit for review.\n")
+			b.WriteString(fmt.Sprintf("- Run: `bd show %s` to see full details.\n", action.IssueID))
+		case model.ReviewStatusDeferred:
+			b.WriteString("- Issue deferred for later consideration.\n")
+			b.WriteString("- No immediate action required.\n")
+		}
+		b.WriteString("\n---\n\n")
+	}
+
+	return b.String()
+}
+
+// findIssueByID finds an issue in the tree by ID
+func (m *ReviewDashboardModel) findIssueByID(id string) *model.Issue {
+	if m.tree.Root.ID == id {
+		return m.tree.Root
+	}
+	for _, desc := range m.tree.Descendants {
+		if desc.ID == id {
+			return desc
+		}
+	}
+	return nil
 }
 
 // ReviewProgram wraps ReviewDashboardModel to implement tea.Model for standalone use

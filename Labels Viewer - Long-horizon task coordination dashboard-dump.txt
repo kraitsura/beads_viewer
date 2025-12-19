@@ -1,0 +1,198 @@
+Label Dashboard Dump: Labels Viewer - Long-horizon task coordination dashboard
+Generated: 2025-12-17T00:42:02-08:00
+============================================================
+
+SUMMARY
+----------------------------------------
+  Total: 77 issues (77 primary, 0 context)
+  Ready: 11, Blocked: 22, In Progress: 1, Closed: 43
+  Progress: 55%
+  Dependency Depth: 3
+
+WORKSTREAMS (Hierarchical)
+----------------------------------------
+[ws:phase1] Phase1 (8 issues, 100% done)
+  Ready: 0, Blocked: 0, In Progress: 0, Closed: 8
+  Issues:
+    - [bv-qhp] Label selector fuzzy search uses wrong index when selecting (closed)
+    - [bv-dzp] Epic mode dashboard view (closed)
+    - [bv-5jg] Epic support in label selector (closed)
+    - [bv-xo5] Basic keybindings for label view (closed)
+    - [bv-d2f] Visual distinction for labeled vs context issues (closed)
+    - [bv-37c] Dependency expansion for label view (closed)
+    - [bv-ljz] Basic label dashboard view (closed)
+    - [bv-jpk] Label selector UI with fuzzy search (closed)
+
+[ws:phase2] Phase2 (29 issues, 93% done)
+  Ready: 2, Blocked: 0, In Progress: 0, Closed: 27
+  Issues:
+    - [bv-dm3] Collapsed completed summary line in label dashboard (open)
+    - [bv-gjd] Smart auto-collapse for workstreams based on state (open)
+    - [bv-fy4] Consolidate unconnected issues into single "standalone" workstream (closed)
+    - [bv-d41] Flat view as default with 'w' toggle for workstream grouping (closed)
+    - [bv-07n] Label-agnostic distinguishing label algorithm for workstream grouping (closed)
+    - [bv-le3] Label inheritance through dependency chains (closed)
+    - [bv-7kl] Cross-workstream blocker indicators (closed)
+    - [bv-yqn] Update workstream analysis with new algorithm from workstream.go (closed)
+    - [bv-gge] Add sub-workstream navigation methods (closed)
+    - [bv-ppl] Render nested sub-workstreams in UI (closed)
+    - [bv-tzk] Add sub-workstream toggle command (S key) (closed)
+    - [bv-wl0] Update LabelDashboardModel state for sub-workstreams (closed)
+    - [bv-057] Add tests for new workstream features (closed)
+    - [bv-pkv] Add backward-compatible API entry points (closed)
+    - [bv-xg7] Add SubdivideWorkstream and SubdivideAll functions (closed)
+    - [bv-4e0] Update partitionByFamily for suffix handling (closed)
+    - [bv-tqn] Update ScoreFamily with suffix boost (closed)
+    - [bv-jsi] Expand DetectLabelFamilies to 5 passes (closed)
+    - [bv-l93] Add separator-prefix and suffix regex patterns (closed)
+    - [bv-7x8] Add Workstream sub-grouping fields (closed)
+    - [bv-7ie] Add ViewContext and GroupingOptions types (closed)
+    - [bv-471] Workstream connectivity should include parent-child relationships (closed)
+    - [bv-1qo] Epic mode should group children by shared labels (phase1, phase2, etc.) (closed)
+    - [bv-qn6] Graph connectivity algorithm for workstream detection (closed)
+    - [bv-uh2] Per-workstream progress tracking (closed)
+    - [bv-k0r] Workstream naming heuristic (closed)
+    - [bv-3wy] Auto-grouping UI for multiple workstreams (closed)
+    - [bv-tea] Workstream naming should find distinguishing labels, not redundant ones (closed)
+    - [bv-qyu] Workstream collapse/expand functionality (closed)
+
+[ws:phase3] Phase3 (5 issues, 0% done)
+  Ready: 0, Blocked: 5, In Progress: 0, Closed: 0
+  Issues:
+    - [bv-6in] Scoped tool integration (graph, insights) (blocked)
+    - [bv-nte] Apply label to downstream/upstream issues (blocked)
+    - [bv-lrp] Inline label creation (blocked)
+    - [bv-hqw] Multi-label selection with union/intersection (blocked)
+    - [bv-p73] Pinned labels with persistence (blocked)
+
+[ws:phase4] Phase4 (5 issues, 0% done)
+  Ready: 4, Blocked: 1, In Progress: 0, Closed: 0
+  Issues:
+    - [bv-43m] Performance optimization for large label graphs (open)
+    - [bv-dq3] Focus mode for single workstream (open)
+    - [bv-26u] Fully blocked workstream warning UI (open)
+    - [bv-ioy] Prefix-based label grouping in selector (open)
+    - [bv-b3u] Session restoration for label view (open)
+
+[ws:phase5] Phase5 (9 issues, 88% done)
+  Ready: 0, Blocked: 0, In Progress: 1, Closed: 8
+  Issues:
+    - [bv-ug9] Copy issue prompt to clipboard with 'p' key (in_progress)
+    - [bv-r0z] Fix label selector keyboard - add vim-style insert mode (i/esc) (closed)
+    - [bv-59f] Fix label dashboard split view - match sleek container style (closed)
+    - [bv-0wu] Add labels section below info bar in detail viewer (closed)
+    - [bv-r0y] Redo info bar in detail viewer - fix fragmented lines (closed)
+    - [bv-cra] Make vertical divider span full height in split view (closed)
+    - [bv-14l] Launch AI CLI with issue prompt via 'P' key (closed)
+    - [bv-1qu] Reuse main dashboard task viewer in labels view (closed)
+    - [bv-sn3] Scope label for filtered search with 's' key (closed)
+
+[standalone] Standalone (20 issues, 0% done)
+  Ready: 4, Blocked: 16, In Progress: 0, Closed: 0
+  Issues:
+    - [bv-9x9t] Edit Mode for Label Dashboard - Inline bead editing with field constraints (open)
+    - [bv-jyzf] Add EditModeState struct and focus management (open)
+    - [bv-2hrw] Implement tag editor for labels field (open)
+    - [bv-akut] Implement text area fields for multi-line data (open)
+    - [bv-ux3z] Implement text input fields for single-line data (open)
+    - [bv-bzmw] Implement selector component for fixed-option fields (open)
+    - [bv-5m95] Create edit form component (editform.go) (open)
+    - [bv-5awa] Add 'u' keybind for quick status update dialog (open)
+    - [bv-waek] Implement blocked status transition constraints (open)
+    - [bv-n5ro] Implement save handler with bd update integration (open)
+    - [bv-7ko1] Handle concurrent edit detection (open)
+    - [bv-gqkd] Add validation error display in edit form (open)
+    - [bv-br8b] Implement field cycling with Tab/Shift+Tab (open)
+    - [bv-u59b] Add 'e' keybind to enter edit mode in label dashboard (open)
+    - [bv-jz38] Implement cancel handler with restore (open)
+    - [bv-hboz] Add visual dirty indicator and unsaved changes warning (open)
+    - [bv-rb2o] Add keyboard shortcut help footer in edit mode (open)
+    - [bv-ijt5] Add help menu overlay to label dashboard with ? keybind (open)
+    - [bv-dwz6] Remove footer keybind hints from label dashboard (open)
+    - [bv-wgfl] Add Shift+C keybind to copy bead info in label dashboard (open)
+
+
+ISSUES BY DEPTH
+----------------------------------------
+
+Depth 1 (38 issues):
+  [bv-9x9t] Edit Mode for Label Dashboard - Inline bead editing with field constraints (open)
+  [bv-dm3] Collapsed completed summary line in label dashboard (open)
+  [bv-ijt5] Add help menu overlay to label dashboard with ? keybind (open)
+  [bv-wgfl] Add Shift+C keybind to copy bead info in label dashboard (open)
+  [bv-gjd] Smart auto-collapse for workstreams based on state (open)
+  [bv-43m] Performance optimization for large label graphs (open)
+  [bv-dq3] Focus mode for single workstream (open)
+  [bv-26u] Fully blocked workstream warning UI (open)
+  [bv-ioy] Prefix-based label grouping in selector (open)
+  [bv-ug9] Copy issue prompt to clipboard with 'p' key (in_progress)
+  [bv-6in] Scoped tool integration (graph, insights) (blocked)
+  [bv-nte] Apply label to downstream/upstream issues (blocked)
+  [bv-lrp] Inline label creation (blocked)
+  [bv-hqw] Multi-label selection with union/intersection (blocked)
+  [bv-p73] Pinned labels with persistence (blocked)
+  [bv-fy4] Consolidate unconnected issues into single "standalone" workstream (closed)
+  [bv-d41] Flat view as default with 'w' toggle for workstream grouping (closed)
+  [bv-07n] Label-agnostic distinguishing label algorithm for workstream grouping (closed)
+  [bv-r0z] Fix label selector keyboard - add vim-style insert mode (i/esc) (closed)
+  [bv-59f] Fix label dashboard split view - match sleek container style (closed)
+  [bv-yqn] Update workstream analysis with new algorithm from workstream.go (closed)
+  [bv-471] Workstream connectivity should include parent-child relationships (closed)
+  [bv-qhp] Label selector fuzzy search uses wrong index when selecting (closed)
+  [bv-dzp] Epic mode dashboard view (closed)
+  [bv-5jg] Epic support in label selector (closed)
+  [bv-xo5] Basic keybindings for label view (closed)
+  [bv-d2f] Visual distinction for labeled vs context issues (closed)
+  [bv-37c] Dependency expansion for label view (closed)
+  [bv-ljz] Basic label dashboard view (closed)
+  [bv-jpk] Label selector UI with fuzzy search (closed)
+  [bv-0wu] Add labels section below info bar in detail viewer (closed)
+  [bv-r0y] Redo info bar in detail viewer - fix fragmented lines (closed)
+  [bv-cra] Make vertical divider span full height in split view (closed)
+  [bv-tea] Workstream naming should find distinguishing labels, not redundant ones (closed)
+  [bv-14l] Launch AI CLI with issue prompt via 'P' key (closed)
+  [bv-1qu] Reuse main dashboard task viewer in labels view (closed)
+  [bv-sn3] Scope label for filtered search with 's' key (closed)
+  [bv-qyu] Workstream collapse/expand functionality (closed)
+
+Depth 2 (27 issues):
+  [bv-jyzf] Add EditModeState struct and focus management (open)
+  [bv-5awa] Add 'u' keybind for quick status update dialog (open)
+  [bv-n5ro] Implement save handler with bd update integration (open)
+  [bv-br8b] Implement field cycling with Tab/Shift+Tab (open)
+  [bv-u59b] Add 'e' keybind to enter edit mode in label dashboard (open)
+  [bv-jz38] Implement cancel handler with restore (open)
+  [bv-hboz] Add visual dirty indicator and unsaved changes warning (open)
+  [bv-rb2o] Add keyboard shortcut help footer in edit mode (open)
+  [bv-dwz6] Remove footer keybind hints from label dashboard (open)
+  [bv-b3u] Session restoration for label view (open)
+  [bv-le3] Label inheritance through dependency chains (closed)
+  [bv-7kl] Cross-workstream blocker indicators (closed)
+  [bv-gge] Add sub-workstream navigation methods (closed)
+  [bv-ppl] Render nested sub-workstreams in UI (closed)
+  [bv-tzk] Add sub-workstream toggle command (S key) (closed)
+  [bv-wl0] Update LabelDashboardModel state for sub-workstreams (closed)
+  [bv-057] Add tests for new workstream features (closed)
+  [bv-pkv] Add backward-compatible API entry points (closed)
+  [bv-xg7] Add SubdivideWorkstream and SubdivideAll functions (closed)
+  [bv-4e0] Update partitionByFamily for suffix handling (closed)
+  [bv-tqn] Update ScoreFamily with suffix boost (closed)
+  [bv-jsi] Expand DetectLabelFamilies to 5 passes (closed)
+  [bv-l93] Add separator-prefix and suffix regex patterns (closed)
+  [bv-7x8] Add Workstream sub-grouping fields (closed)
+  [bv-7ie] Add ViewContext and GroupingOptions types (closed)
+  [bv-1qo] Epic mode should group children by shared labels (phase1, phase2, etc.) (closed)
+  [bv-qn6] Graph connectivity algorithm for workstream detection (closed)
+
+Depth 3 (11 issues):
+  [bv-2hrw] Implement tag editor for labels field (open)
+  [bv-akut] Implement text area fields for multi-line data (open)
+  [bv-ux3z] Implement text input fields for single-line data (open)
+  [bv-bzmw] Implement selector component for fixed-option fields (open)
+  [bv-5m95] Create edit form component (editform.go) (open)
+  [bv-waek] Implement blocked status transition constraints (open)
+  [bv-7ko1] Handle concurrent edit detection (open)
+  [bv-gqkd] Add validation error display in edit form (open)
+  [bv-uh2] Per-workstream progress tracking (closed)
+  [bv-k0r] Workstream naming heuristic (closed)
+  [bv-3wy] Auto-grouping UI for multiple workstreams (closed)
