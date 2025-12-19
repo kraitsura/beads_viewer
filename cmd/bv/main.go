@@ -2375,6 +2375,12 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Handle --robot-review (placeholder for review tree output)
+	if *robotReview {
+		fmt.Println(`{"status": "robot-review not yet implemented"}`)
+		os.Exit(0)
+	}
+
 	if *robotTriage || *robotNext || *robotTriageByTrack || *robotTriageByLabel {
 		// bv-87: Support track/label-aware grouping for multi-agent coordination
 		opts := analysis.TriageOptions{

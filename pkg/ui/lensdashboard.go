@@ -39,20 +39,20 @@ func (d DepthOption) String() string {
 	return fmt.Sprintf("%d", d)
 }
 
-// TreeNode represents a node in the dependency tree
-type TreeNode struct {
+// LensTreeNode represents a node in the dependency tree
+type LensTreeNode struct {
 	Issue        model.Issue
 	IsPrimary    bool        // true if has the label
 	IsEntryEpic  bool        // true if this is the entry point epic (when viewing an epic)
-	Children     []*TreeNode // downstream issues (what this unblocks)
+	Children     []*LensTreeNode // downstream issues (what this unblocks)
 	Depth        int         // depth in tree (0 = root)
 	IsLastChild  bool        // for rendering tree lines
 	ParentPath   []bool      // track which ancestors are last children (for tree lines)
 }
 
-// FlatNode is a flattened tree node for display/navigation
-type FlatNode struct {
-	Node       *TreeNode
+// LensFlatNode is a flattened tree node for display/navigation
+type LensFlatNode struct {
+	Node       *LensTreeNode
 	TreePrefix string // rendered tree prefix (├─►, └─►, etc.)
 	Status     string // ready, blocked, in_progress, closed
 	BlockedBy  string // ID of blocker if blocked
@@ -66,8 +66,8 @@ type LensDashboardModel struct {
 	epicID    string // Only set if viewMode == "epic"
 
 	// Tree data
-	roots       []*TreeNode          // Root nodes (ready issues or all primaries at depth 1)
-	flatNodes   []FlatNode           // Flattened for display
+	roots       []*LensTreeNode          // Root nodes (ready issues or all primaries at depth 1)
+	flatNodes   []LensFlatNode           // Flattened for display
 	allIssues   []model.Issue        // Reference to all issues
 	issueMap    map[string]*model.Issue
 	primaryIDs  map[string]bool      // Issues that have the label (expanded via parent-child)
@@ -708,7 +708,7 @@ func (m *LensDashboardModel) buildTree() {
 }
 
 // buildTreeNode recursively builds a tree node
-func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool) *TreeNode {
+func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool) *LensTreeNode {
 	if seen[issue.ID] {
 		return nil
 	}
@@ -717,7 +717,7 @@ func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth in
 	// Use depth-appropriate primary IDs for IsPrimary determination
 	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
 
-	node := &TreeNode{
+	node := &LensTreeNode{
 		Issue:       issue,
 		IsPrimary:   depthPrimaryIDs[issue.ID],
 		IsEntryEpic: (m.viewMode == "epic" || m.viewMode == "bead") && issue.ID == m.epicID,
@@ -895,7 +895,7 @@ func (m *LensDashboardModel) addUpstreamContextBlockers(seen map[string]bool, ma
 
 // buildContextBlockerNode builds a tree node for context blockers,
 // following downstream within the context blocker set
-func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, contextBlockerSet map[string]bool) *TreeNode {
+func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, contextBlockerSet map[string]bool) *LensTreeNode {
 	if seen[issue.ID] {
 		return nil
 	}
@@ -904,7 +904,7 @@ func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, m
 	// Use depth-appropriate primary IDs for IsPrimary determination
 	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
 
-	node := &TreeNode{
+	node := &LensTreeNode{
 		Issue:       issue,
 		IsPrimary:   depthPrimaryIDs[issue.ID],
 		Depth:       depth,
@@ -974,11 +974,11 @@ func (m *LensDashboardModel) flattenTree() {
 }
 
 // flattenNode recursively flattens a node and its children
-func (m *LensDashboardModel) flattenNode(node *TreeNode) {
+func (m *LensDashboardModel) flattenNode(node *LensTreeNode) {
 	prefix := m.buildTreePrefix(node)
 	status := m.getIssueStatus(node.Issue)
 
-	fn := FlatNode{
+	fn := LensFlatNode{
 		Node:       node,
 		TreePrefix: prefix,
 		Status:     status,
@@ -992,7 +992,7 @@ func (m *LensDashboardModel) flattenNode(node *TreeNode) {
 }
 
 // buildTreePrefix builds the tree line prefix for a node
-func (m *LensDashboardModel) buildTreePrefix(node *TreeNode) string {
+func (m *LensDashboardModel) buildTreePrefix(node *LensTreeNode) string {
 	if node.Depth == 0 {
 		return ""
 	}
@@ -1748,7 +1748,7 @@ func (m *LensDashboardModel) GetWorkstreams() []analysis.Workstream {
 }
 
 // buildWorkstreamTree builds a dependency tree for issues within a workstream
-func (m *LensDashboardModel) buildWorkstreamTree(ws *analysis.Workstream) []*TreeNode {
+func (m *LensDashboardModel) buildWorkstreamTree(ws *analysis.Workstream) []*LensTreeNode {
 	if len(ws.Issues) == 0 {
 		return nil
 	}
@@ -1798,7 +1798,7 @@ func (m *LensDashboardModel) buildWorkstreamTree(ws *analysis.Workstream) []*Tre
 		maxDepth = 100
 	}
 
-	var roots []*TreeNode
+	var roots []*LensTreeNode
 	for i, issue := range rootIssues {
 		if seen[issue.ID] {
 			continue
@@ -1814,13 +1814,13 @@ func (m *LensDashboardModel) buildWorkstreamTree(ws *analysis.Workstream) []*Tre
 }
 
 // buildWSTreeNode recursively builds a tree node for workstream tree view
-func (m *LensDashboardModel) buildWSTreeNode(issue *model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, downstream map[string][]string, wsIssueMap map[string]*model.Issue) *TreeNode {
+func (m *LensDashboardModel) buildWSTreeNode(issue *model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, downstream map[string][]string, wsIssueMap map[string]*model.Issue) *LensTreeNode {
 	if seen[issue.ID] {
 		return nil
 	}
 	seen[issue.ID] = true
 
-	node := &TreeNode{
+	node := &LensTreeNode{
 		Issue:       *issue,
 		IsPrimary:   true, // All workstream issues are "primary"
 		Depth:       depth,
@@ -1852,19 +1852,19 @@ func (m *LensDashboardModel) buildWSTreeNode(issue *model.Issue, depth, maxDepth
 }
 
 // flattenWSTree converts workstream tree to flat list for display
-func (m *LensDashboardModel) flattenWSTree(roots []*TreeNode) []FlatNode {
-	var flatNodes []FlatNode
+func (m *LensDashboardModel) flattenWSTree(roots []*LensTreeNode) []LensFlatNode {
+	var flatNodes []LensFlatNode
 	for _, root := range roots {
 		m.flattenWSTreeNode(root, &flatNodes)
 	}
 	return flatNodes
 }
 
-func (m *LensDashboardModel) flattenWSTreeNode(node *TreeNode, flatNodes *[]FlatNode) {
+func (m *LensDashboardModel) flattenWSTreeNode(node *LensTreeNode, flatNodes *[]LensFlatNode) {
 	prefix := m.buildTreePrefix(node)
 	status := m.getIssueStatus(node.Issue)
 
-	fn := FlatNode{
+	fn := LensFlatNode{
 		Node:       node,
 		TreePrefix: prefix,
 		Status:     status,
@@ -2327,7 +2327,7 @@ func (m *LensDashboardModel) renderStatusHeader(status string) string {
 }
 
 // renderTreeNode renders a single tree node
-func (m *LensDashboardModel) renderTreeNode(fn FlatNode, isSelected bool, maxWidth int) string {
+func (m *LensDashboardModel) renderTreeNode(fn LensFlatNode, isSelected bool, maxWidth int) string {
 	t := m.theme
 	node := fn.Node
 

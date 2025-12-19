@@ -64,7 +64,7 @@ type LabelFamily struct {
 }
 
 // LabelStats holds statistics for a single label
-type LabelStats struct {
+type WorkstreamLabelStats struct {
 	Label    string
 	Count    int
 	Coverage float64 // count / total issues
@@ -344,8 +344,8 @@ func DetectLabelFamilies(labels []string) []*LabelFamily {
 }
 
 // AnalyzeLabels computes statistics for all labels in the issue set
-func AnalyzeLabels(issues []model.Issue, contextLabel string) map[string]*LabelStats {
-	stats := make(map[string]*LabelStats)
+func AnalyzeLabels(issues []model.Issue, contextLabel string) map[string]*WorkstreamLabelStats {
+	stats := make(map[string]*WorkstreamLabelStats)
 	total := len(issues)
 	if total == 0 {
 		return stats
@@ -358,7 +358,7 @@ func AnalyzeLabels(issues []model.Issue, contextLabel string) map[string]*LabelS
 				continue
 			}
 			if stats[label] == nil {
-				stats[label] = &LabelStats{Label: label}
+				stats[label] = &WorkstreamLabelStats{Label: label}
 			}
 			stats[label].Count++
 		}
@@ -747,7 +747,7 @@ func DetectWorkstreams(issues []model.Issue, primaryIDs map[string]bool, selecte
 	return workstreams
 }
 
-func partitionByFamily(issues []model.Issue, family *LabelFamily, stats map[string]*LabelStats, selectedLabel string, primaryIDs map[string]bool) []Workstream {
+func partitionByFamily(issues []model.Issue, family *LabelFamily, stats map[string]*WorkstreamLabelStats, selectedLabel string, primaryIDs map[string]bool) []Workstream {
 	workstreams := make(map[string]*Workstream)
 	standalone := &Workstream{
 		ID:       "standalone",
