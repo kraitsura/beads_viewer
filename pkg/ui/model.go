@@ -49,6 +49,7 @@ const (
 	focusBoard
 	focusGraph
 	focusLabelDashboard
+	focusLensSelector
 	focusLensDashboard
 	focusInsights
 	focusActionable
@@ -266,7 +267,8 @@ type Model struct {
 	renderer           *MarkdownRenderer
 	board              BoardModel
 	labelDashboard     LabelDashboardModel
-	lensDashboard      LensDashboardModel // Advanced tree-based dashboard with workstream support
+	lensDashboard      LensDashboardModel  // Advanced tree-based dashboard with workstream support
+	lensSelector       LensSelectorModel   // Lens picker for selecting label/epic/bead to explore
 	velocityComparison VelocityComparisonModel // bv-125
 	shortcutsSidebar   ShortcutsSidebar        // bv-3qi5
 	graphView          GraphModel
@@ -296,6 +298,7 @@ type Model struct {
 	showLabelHealthDetail    bool
 	showLabelDrilldown       bool
 	showLensDashboard        bool // Show the lens dashboard (tree view with workstreams)
+	showLensSelector         bool // Show the lens selector picker
 	labelHealthDetail        *analysis.LabelHealth
 	labelHealthDetailFlow    labelFlowSummary
 	labelDrilldownLabel      string
@@ -2038,43 +2041,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "v":
-				// Open lens dashboard (tree view with workstream support)
+				// Open lens selector (picker for label/epic/bead exploration)
 				m.clearAttentionOverlay()
 				m.isGraphView = false
 				m.isBoardView = false
 				m.isActionableView = false
 				m.isHistoryView = false
-				m.showLensDashboard = true
-				m.focused = focusLensDashboard
-				// Initialize lens dashboard with current selected issue or first epic
-				if len(m.issues) > 0 {
-					issueMap := make(map[string]*model.Issue)
-					for i := range m.issues {
-						issueMap[m.issues[i].ID] = &m.issues[i]
-					}
-					m.issueMap = issueMap
-					// Find first epic or use selected issue
-					var entryID string
-					if selected := m.list.SelectedItem(); selected != nil {
-						if issueItem, ok := selected.(IssueItem); ok {
-							entryID = issueItem.Issue.ID
-						}
-					}
-					if entryID == "" {
-						for _, issue := range m.issues {
-							if issue.IssueType == model.TypeEpic {
-								entryID = issue.ID
-								break
-							}
-						}
-					}
-					if entryID == "" && len(m.issues) > 0 {
-						entryID = m.issues[0].ID
-					}
-					m.lensDashboard = NewLensDashboardModel(entryID, m.issues, issueMap, m.theme)
-					m.lensDashboard.SetSize(m.width, m.height-1)
-				}
-				m.statusMsg = "Lens view: j/k nav • w workstreams • d depth • c centered • enter select"
+				m.showLensSelector = true
+				m.focused = focusLensSelector
+				// Initialize lens selector with issues and graph stats
+				m.lensSelector = NewLensSelectorModel(m.issues, m.theme, m.analysis)
+				m.lensSelector.SetSize(m.width, m.height-1)
+				m.statusMsg = "Lens: i search • j/k nav • s scope • enter select • esc cancel"
 				m.statusIsError = false
 				return m, nil
 
@@ -2253,6 +2231,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case focusFlowMatrix:
 				m = m.handleFlowMatrixKeys(msg)
+
+			case focusLensSelector:
+				m = m.handleLensSelectorKeys(msg)
 
 			case focusLensDashboard:
 				m = m.handleLensDashboardKeys(msg)
@@ -2684,6 +2665,57 @@ func (m Model) handleActionableKeys(msg tea.KeyMsg) Model {
 			m.updateViewportContent()
 		}
 	}
+	return m
+}
+
+// handleLensSelectorKeys handles keyboard input when lens selector is focused
+func (m Model) handleLensSelectorKeys(msg tea.KeyMsg) Model {
+	// Pass key to lens selector
+	handled := m.lensSelector.Update(msg.String())
+
+	// Check if selection was made
+	if m.lensSelector.IsConfirmed() {
+		selectedItem := m.lensSelector.SelectedItem()
+		if selectedItem != nil {
+			// Open lens dashboard with selected item
+			m.showLensSelector = false
+			m.showLensDashboard = true
+			m.focused = focusLensDashboard
+
+			// Build issue map
+			issueMap := make(map[string]*model.Issue)
+			for i := range m.issues {
+				issueMap[m.issues[i].ID] = &m.issues[i]
+			}
+			m.issueMap = issueMap
+
+			// Initialize lens dashboard with selected label/epic/bead
+			m.lensDashboard = NewLensDashboardModel(selectedItem.Value, m.issues, issueMap, m.theme)
+			m.lensDashboard.SetSize(m.width, m.height-1)
+			m.statusMsg = fmt.Sprintf("Lens: %s • j/k nav • w workstreams • d depth • c centered", selectedItem.Title)
+			m.statusIsError = false
+		}
+		return m
+	}
+
+	// Check if cancelled
+	if m.lensSelector.IsCancelled() {
+		m.showLensSelector = false
+		m.focused = focusList
+		m.statusMsg = ""
+		return m
+	}
+
+	// Update status if key was handled
+	if !handled {
+		// Handle escape to close
+		if msg.String() == "esc" || msg.String() == "q" {
+			m.showLensSelector = false
+			m.focused = focusList
+			m.statusMsg = ""
+		}
+	}
+
 	return m
 }
 
@@ -3490,6 +3522,9 @@ func (m Model) View() string {
 	} else if m.focused == focusLabelDashboard {
 		m.labelDashboard.SetSize(m.width, m.height-1)
 		body = m.labelDashboard.View()
+	} else if m.focused == focusLensSelector || m.showLensSelector {
+		m.lensSelector.SetSize(m.width, m.height-1)
+		body = m.lensSelector.View()
 	} else if m.focused == focusLensDashboard || m.showLensDashboard {
 		m.lensDashboard.SetSize(m.width, m.height-1)
 		body = m.lensDashboard.View()
