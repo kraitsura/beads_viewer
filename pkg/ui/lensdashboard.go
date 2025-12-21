@@ -10,6 +10,7 @@ import (
 	"github.com/Dicklesworthstone/beads_viewer/pkg/analysis"
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -29,7 +30,31 @@ type ViewType int
 const (
 	ViewTypeFlat       ViewType = 0
 	ViewTypeWorkstream ViewType = 1
+	ViewTypeGrouped    ViewType = 2
 )
+
+// GroupByMode determines how issues are grouped in grouped view
+type GroupByMode int
+
+const (
+	GroupByLabel    GroupByMode = iota // Group by most popular labels
+	GroupByPriority                    // Group by priority (P0, P1, P2, P3+)
+	GroupByStatus                      // Group by status (Open, In Progress, Blocked, Closed)
+)
+
+// String returns display name for the group-by mode
+func (g GroupByMode) String() string {
+	switch g {
+	case GroupByLabel:
+		return "Label"
+	case GroupByPriority:
+		return "Priority"
+	case GroupByStatus:
+		return "Status"
+	default:
+		return "Label"
+	}
+}
 
 // ScopeMode represents how multiple scope labels are combined
 type ScopeMode int
@@ -55,6 +80,64 @@ func (s ScopeMode) ShortString() string {
 	return "∪ ANY"
 }
 
+// Viewport constants for consistent layout calculations
+const (
+	lensHeaderMinLines   = 4 // title + stats + summary + blank
+	lensFooterLines      = 2 // blank + keybinds
+	lensMinContentHeight = 5
+)
+
+// ViewportConfig holds calculated viewport dimensions
+type ViewportConfig struct {
+	HeaderLines   int
+	FooterLines   int
+	ContentHeight int
+}
+
+// calculateViewport returns the current viewport configuration
+func (m *LensDashboardModel) calculateViewport() ViewportConfig {
+	headerLines := lensHeaderMinLines
+	if len(m.scopeLabels) > 0 {
+		headerLines++
+	}
+	if m.showScopeInput {
+		headerLines += 2
+	}
+
+	contentHeight := m.height - headerLines - lensFooterLines
+	if contentHeight < lensMinContentHeight {
+		contentHeight = lensMinContentHeight
+	}
+
+	return ViewportConfig{
+		HeaderLines:   headerLines,
+		FooterLines:   lensFooterLines,
+		ContentHeight: contentHeight,
+	}
+}
+
+// applyScrollWindow slices content by scroll offset and visible lines
+func (m *LensDashboardModel) applyScrollWindow(allLines []string, scroll, visibleLines int) []string {
+	if len(allLines) == 0 {
+		return nil
+	}
+
+	startIdx := scroll
+	endIdx := scroll + visibleLines
+
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	if startIdx >= len(allLines) {
+		startIdx = len(allLines) - 1
+	}
+	if endIdx > len(allLines) {
+		endIdx = len(allLines)
+	}
+
+	return allLines[startIdx:endIdx]
+}
+
 // String returns display string for depth
 func (d DepthOption) String() string {
 	if d == DepthAll {
@@ -78,10 +161,11 @@ type LensTreeNode struct {
 
 // LensFlatNode is a flattened tree node for display/navigation
 type LensFlatNode struct {
-	Node       *LensTreeNode
-	TreePrefix string // rendered tree prefix (├─►, └─►, etc.)
-	Status     string // ready, blocked, in_progress, closed
-	BlockedBy  string // ID of blocker if blocked
+	Node          *LensTreeNode
+	TreePrefix    string // rendered tree prefix (├─►, └─►, etc.)
+	Status        string // ready, blocked, in_progress, closed
+	BlockedBy     string // ID of blocker if blocked
+	BlockerInTree bool   // true if BlockedBy is visible as ancestor in tree
 }
 
 // LensDashboardModel represents the label dashboard view
@@ -115,9 +199,8 @@ type LensDashboardModel struct {
 	epicDescendantsByDepth map[DepthOption]map[string]bool
 
 	// Dependency graphs
-	downstream      map[string][]string // issue ID -> issues it unblocks (blocks + parent-child)
-	upstream        map[string][]string // issue ID -> issues that block it
-	parentChildDown map[string][]string // issue ID -> children (parent-child only, no blocking)
+	downstream map[string][]string // issue ID -> issues it unblocks (blocks + parent-child)
+	upstream   map[string][]string // issue ID -> issues that block it
 
 	// Dependency expansion
 	dependencyDepth DepthOption
@@ -141,6 +224,17 @@ type LensDashboardModel struct {
 	wsSubdivided   bool                   // Whether subdivision is active
 	subWSExpanded  map[int]map[int]bool   // wsIndex -> subIndex -> expanded
 	subWsCursor    map[int]int            // wsIndex -> subWsCursor
+
+	// Grouped view state
+	groupByMode        GroupByMode           // Current grouping mode (Label, Priority, Status)
+	groupedSections    []analysis.Workstream // Grouped sections (reusing Workstream struct)
+	groupedExpanded    map[int]bool          // Expansion state per group
+	groupedSubExpanded map[int]map[int]bool  // groupIndex -> subIndex -> expanded
+	groupedCursor      int                   // Which group is selected
+	groupedSubCursor   int                   // Which sub-group is selected (-1 = on group level)
+	groupedIssueCursor int                   // Which issue within group/sub-group (-1 = header)
+	groupedScroll      int                   // Scroll offset for grouped view
+	groupedTreeView    bool                  // Show dependency tree within groups
 
 	// UI State
 	cursor          int
@@ -167,6 +261,11 @@ type LensDashboardModel struct {
 	// Scope input modal
 	showScopeInput bool   // True when scope input modal is visible
 	scopeInput     string // Current text in scope input
+
+	// Split view (bead detail panel)
+	detailViewport viewport.Model // Viewport for bead details on the right
+	detailFocus    bool           // True when detail panel has focus
+	splitViewMode  bool           // True when in split view mode (wide terminal)
 }
 
 // NewLensDashboardModel creates a new label dashboard for the given label
@@ -201,6 +300,7 @@ func NewLensDashboardModel(labelName string, allIssues []model.Issue, issueMap m
 	m.buildGraphs()
 	m.buildTree()
 	m.recomputeWorkstreams() // Ensure workstreams use same issue set as flat view
+	m.initDetailViewport()
 
 	return m
 }
@@ -257,6 +357,7 @@ func NewBeadLensModel(issueID string, allIssues []model.Issue, issueMap map[stri
 	m.buildGraphs()
 	m.buildTree()
 	m.recomputeWorkstreams()
+	m.initDetailViewport()
 
 	return m
 }
@@ -296,6 +397,7 @@ func NewEpicLensModel(epicID string, epicTitle string, allIssues []model.Issue, 
 	m.buildGraphs()
 	m.buildTree()
 	m.recomputeWorkstreams() // Ensure workstreams use same issue set as flat view
+	m.initDetailViewport()
 
 	return m
 }
@@ -333,32 +435,27 @@ func buildEpicDescendantsByDepth(epicID string, issues []model.Issue) map[DepthO
 	result := make(map[DepthOption]map[string]bool)
 
 	// BFS with depth tracking
-	type queueItem struct {
-		id    string
-		depth int
-	}
-
 	// Collect descendants at each level
 	descendantsByLevel := make(map[int]map[string]bool)
 	visited := make(map[string]bool)
-	queue := []queueItem{{id: epicID, depth: 0}}
+	queue := []BFSQueueItem{{ID: epicID, Depth: 0}}
 	visited[epicID] = true
 
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
 
-		for _, childID := range children[current.id] {
+		for _, childID := range children[current.ID] {
 			if !visited[childID] {
 				visited[childID] = true
-				childDepth := current.depth + 1
+				childDepth := current.Depth + 1
 
 				if descendantsByLevel[childDepth] == nil {
 					descendantsByLevel[childDepth] = make(map[string]bool)
 				}
 				descendantsByLevel[childDepth][childID] = true
 
-				queue = append(queue, queueItem{id: childID, depth: childDepth})
+				queue = append(queue, BFSQueueItem{ID: childID, Depth: childDepth})
 			}
 		}
 	}
@@ -515,15 +612,10 @@ func buildBeadDescendantsByDepth(beadID string, issues []model.Issue) map[DepthO
 	result := make(map[DepthOption]map[string]bool)
 
 	// BFS with depth tracking - follow both parent-child and blocking edges
-	type queueItem struct {
-		id    string
-		depth int
-	}
-
 	// Collect descendants at each level
 	descendantsByLevel := make(map[int]map[string]bool)
 	visited := make(map[string]bool)
-	queue := []queueItem{{id: beadID, depth: 0}}
+	queue := []BFSQueueItem{{ID: beadID, Depth: 0}}
 	visited[beadID] = true
 
 	for len(queue) > 0 {
@@ -531,32 +623,32 @@ func buildBeadDescendantsByDepth(beadID string, issues []model.Issue) map[DepthO
 		queue = queue[1:]
 
 		// Follow parent-child edges
-		for _, childID := range children[current.id] {
+		for _, childID := range children[current.ID] {
 			if !visited[childID] {
 				visited[childID] = true
-				childDepth := current.depth + 1
+				childDepth := current.Depth + 1
 
 				if descendantsByLevel[childDepth] == nil {
 					descendantsByLevel[childDepth] = make(map[string]bool)
 				}
 				descendantsByLevel[childDepth][childID] = true
 
-				queue = append(queue, queueItem{id: childID, depth: childDepth})
+				queue = append(queue, BFSQueueItem{ID: childID, Depth: childDepth})
 			}
 		}
 
 		// Follow blocking edges
-		for _, blockedID := range blocks[current.id] {
+		for _, blockedID := range blocks[current.ID] {
 			if !visited[blockedID] {
 				visited[blockedID] = true
-				blockedDepth := current.depth + 1
+				blockedDepth := current.Depth + 1
 
 				if descendantsByLevel[blockedDepth] == nil {
 					descendantsByLevel[blockedDepth] = make(map[string]bool)
 				}
 				descendantsByLevel[blockedDepth][blockedID] = true
 
-				queue = append(queue, queueItem{id: blockedID, depth: blockedDepth})
+				queue = append(queue, BFSQueueItem{ID: blockedID, Depth: blockedDepth})
 			}
 		}
 	}
@@ -756,6 +848,9 @@ func (m *LensDashboardModel) buildTree() {
 	if m.dependencyDepth != Depth1 {
 		m.addUpstreamContextBlockers(seen, maxDepth)
 	}
+
+	// Fix tree structure (correct IsLastChild/ParentPath after siblings may have been claimed)
+	m.fixTreeStructure()
 
 	// Flatten tree for display
 	m.flattenTree()
@@ -1029,29 +1124,70 @@ func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, m
 	return node
 }
 
+// fixTreeStructure corrects IsLastChild and ParentPath values after tree construction.
+// This is needed because during recursive building, siblings may get "claimed" by earlier
+// branches, leaving incorrect IsLastChild values that cause tree lines to extend too far.
+func (m *LensDashboardModel) fixTreeStructure() {
+	for i, root := range m.roots {
+		isLast := i == len(m.roots)-1
+		root.IsLastChild = isLast
+		root.ParentPath = nil
+		m.fixNodeChildren(root, nil)
+	}
+}
+
+// fixNodeChildren recursively fixes IsLastChild and ParentPath for all children
+func (m *LensDashboardModel) fixNodeChildren(node *LensTreeNode, parentPath []bool) {
+	if len(node.Children) == 0 {
+		return
+	}
+
+	// Build the parent path for children (includes this node's IsLastChild)
+	childParentPath := append([]bool{}, parentPath...)
+	childParentPath = append(childParentPath, node.IsLastChild)
+
+	// Fix each child's IsLastChild and ParentPath
+	for i, child := range node.Children {
+		child.IsLastChild = i == len(node.Children)-1
+		child.ParentPath = append([]bool{}, childParentPath...)
+		m.fixNodeChildren(child, childParentPath)
+	}
+}
+
 // flattenTree converts the tree to a flat list for display
 func (m *LensDashboardModel) flattenTree() {
 	m.flatNodes = nil
 	for _, root := range m.roots {
-		m.flattenNode(root)
+		m.flattenNode(root, make(map[string]bool))
 	}
 }
 
-// flattenNode recursively flattens a node and its children
-func (m *LensDashboardModel) flattenNode(node *LensTreeNode) {
+// flattenNode recursively flattens a node and its children.
+// ancestors tracks issue IDs visible above this node in the tree, used to detect
+// if a blocker is already visible (so we can suppress the redundant indicator).
+func (m *LensDashboardModel) flattenNode(node *LensTreeNode, ancestors map[string]bool) {
 	prefix := m.buildTreePrefix(node)
 	status := m.getIssueStatus(node.Issue)
+	blockerID := m.blockedByMap[node.Issue.ID]
 
 	fn := LensFlatNode{
-		Node:       node,
-		TreePrefix: prefix,
-		Status:     status,
-		BlockedBy:  m.blockedByMap[node.Issue.ID],
+		Node:          node,
+		TreePrefix:    prefix,
+		Status:        status,
+		BlockedBy:     blockerID,
+		BlockerInTree: ancestors[blockerID],
 	}
 	m.flatNodes = append(m.flatNodes, fn)
 
+	// Build child ancestors (include current node)
+	childAncestors := make(map[string]bool, len(ancestors)+1)
+	for k := range ancestors {
+		childAncestors[k] = true
+	}
+	childAncestors[node.Issue.ID] = true
+
 	for _, child := range node.Children {
-		m.flattenNode(child)
+		m.flattenNode(child, childAncestors)
 	}
 }
 
@@ -1199,9 +1335,15 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 		}
 	}
 
+	// Fix tree structure (correct IsLastChild/ParentPath after siblings may have been claimed)
+	m.fixTreeStructure()
+
 	// Flatten downstream tree
+	// In centered mode, ego and upstream nodes are visible above downstream,
+	// so include them as "ancestors" for blocker visibility detection
+	centeredAncestors := m.getCenteredAncestors()
 	for _, root := range m.roots {
-		m.flattenNode(root)
+		m.flattenNode(root, centeredAncestors)
 	}
 
 	// Update selected issue
@@ -1213,6 +1355,22 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 		}
 		m.selectedIssueID = m.getSelectedIDForCenteredMode()
 	}
+}
+
+// getCenteredAncestors returns a map of issue IDs that are visible "above" the
+// downstream tree in centered mode: the ego node and all upstream blockers.
+// Used to detect when a blocker is already visible in the tree structure.
+func (m *LensDashboardModel) getCenteredAncestors() map[string]bool {
+	ancestors := make(map[string]bool)
+	// Ego node is visible above all downstream
+	if m.egoNode != nil {
+		ancestors[m.egoNode.Node.Issue.ID] = true
+	}
+	// Upstream blockers are also visible in the tree
+	for _, up := range m.upstreamNodes {
+		ancestors[up.Node.Issue.ID] = true
+	}
+	return ancestors
 }
 
 // buildCenteredTreeNode builds a tree node with relative depth tracking
@@ -1282,6 +1440,289 @@ func (m *LensDashboardModel) buildCenteredTreeNode(issue model.Issue, relDepth, 
 	}
 
 	return node
+}
+
+// isIssueBlockedByDeps checks if an issue is blocked by dependencies
+func (m *LensDashboardModel) isIssueBlockedByDeps(issueID string) bool {
+	return m.blockedByMap[issueID] != ""
+}
+
+// buildWorkstreamFromIssues creates a Workstream struct with computed stats
+func (m *LensDashboardModel) buildWorkstreamFromIssues(name string, issues []model.Issue) analysis.Workstream {
+	ws := analysis.Workstream{
+		ID:       "group:" + name,
+		Name:     name,
+		Issues:   issues,
+		IssueIDs: make([]string, len(issues)),
+	}
+
+	for i, issue := range issues {
+		ws.IssueIDs[i] = issue.ID
+	}
+
+	// Compute stats
+	for _, issue := range issues {
+		switch issue.Status {
+		case model.StatusClosed:
+			ws.ClosedCount++
+		case model.StatusBlocked:
+			ws.BlockedCount++
+		case model.StatusInProgress:
+			ws.InProgressCount++
+		case model.StatusOpen:
+			if m.isIssueBlockedByDeps(issue.ID) {
+				ws.BlockedCount++
+			} else {
+				ws.ReadyCount++
+			}
+		default:
+			ws.ReadyCount++
+		}
+	}
+
+	// Progress = closed / total
+	if len(issues) > 0 {
+		ws.Progress = float64(ws.ClosedCount) / float64(len(issues))
+	}
+
+	ws.PrimaryCount = len(issues)
+	return ws
+}
+
+// buildGroupedByLabel groups issues by their most popular label (no repeats)
+// Level 1: Group by most popular label globally
+// Level 2: Sub-group by next-most-popular label within each group
+func (m *LensDashboardModel) buildGroupedByLabel() []analysis.Workstream {
+	// 1. Calculate label popularity across all primary issues
+	labelCounts := make(map[string]int)
+	for _, issue := range m.allIssues {
+		if !m.primaryIDs[issue.ID] {
+			continue
+		}
+		for _, label := range issue.Labels {
+			labelCounts[label]++
+		}
+	}
+
+	// 2. Sort labels by popularity (descending)
+	var sortedLabels []LabelCount
+	for label, count := range labelCounts {
+		sortedLabels = append(sortedLabels, LabelCount{Label: label, Count: count})
+	}
+	SortLabelCountsDescending(sortedLabels)
+
+	// 3. Build label rank map (lower = more popular)
+	labelRank := make(map[string]int)
+	for i, lc := range sortedLabels {
+		labelRank[lc.Label] = i
+	}
+
+	// 4. Assign each issue to its most popular label
+	groups := make(map[string][]model.Issue)
+	var unlabeled []model.Issue
+
+	for _, issue := range m.allIssues {
+		if !m.primaryIDs[issue.ID] {
+			continue
+		}
+
+		if len(issue.Labels) == 0 {
+			unlabeled = append(unlabeled, issue)
+			continue
+		}
+
+		// Find the most popular label on this issue
+		bestLabel := issue.Labels[0]
+		bestRank := labelRank[bestLabel]
+		for _, label := range issue.Labels[1:] {
+			if rank, ok := labelRank[label]; ok && rank < bestRank {
+				bestLabel = label
+				bestRank = rank
+			}
+		}
+
+		groups[bestLabel] = append(groups[bestLabel], issue)
+	}
+
+	// 5. Convert to Workstream slices, ordered by popularity
+	var result []analysis.Workstream
+	for _, lc := range sortedLabels {
+		if issues, ok := groups[lc.Label]; ok && len(issues) > 0 {
+			ws := m.buildWorkstreamFromIssues(lc.Label, issues)
+			// Build sub-groups for 2-level hierarchy
+			m.buildLabelSubGroups(&ws, labelRank, lc.Label)
+			result = append(result, ws)
+		}
+	}
+
+	// 6. Add unlabeled group at the end
+	if len(unlabeled) > 0 {
+		ws := m.buildWorkstreamFromIssues("Unlabeled", unlabeled)
+		result = append(result, ws)
+	}
+
+	return result
+}
+
+// buildLabelSubGroups creates sub-groups within a label group by secondary label
+func (m *LensDashboardModel) buildLabelSubGroups(parent *analysis.Workstream, labelRank map[string]int, primaryLabel string) {
+	if len(parent.Issues) < 4 { // Don't sub-divide tiny groups
+		return
+	}
+
+	// Find second-most-popular label for each issue (excluding primary)
+	subGroups := make(map[string][]model.Issue)
+	var noSecondary []model.Issue
+
+	for _, issue := range parent.Issues {
+		var secondLabel string
+		secondRank := -1
+
+		for _, label := range issue.Labels {
+			if label == primaryLabel {
+				continue
+			}
+			rank, ok := labelRank[label]
+			if !ok {
+				continue
+			}
+			if secondRank < 0 || rank < secondRank {
+				secondLabel = label
+				secondRank = rank
+			}
+		}
+
+		if secondLabel != "" {
+			subGroups[secondLabel] = append(subGroups[secondLabel], issue)
+		} else {
+			noSecondary = append(noSecondary, issue)
+		}
+	}
+
+	// Only create sub-groups if we have meaningful partitioning
+	if len(subGroups) < 2 {
+		return
+	}
+
+	// Sort sub-groups by size (descending)
+	type subGroup struct {
+		label  string
+		issues []model.Issue
+	}
+	var sortedSubs []subGroup
+	for label, issues := range subGroups {
+		if len(issues) >= 2 {
+			sortedSubs = append(sortedSubs, subGroup{label, issues})
+		} else {
+			// Add small groups to noSecondary
+			noSecondary = append(noSecondary, issues...)
+		}
+	}
+	sort.Slice(sortedSubs, func(i, j int) bool {
+		return len(sortedSubs[i].issues) > len(sortedSubs[j].issues)
+	})
+
+	// Convert to sub-workstreams
+	for _, sg := range sortedSubs {
+		sub := m.buildWorkstreamFromIssues(sg.label, sg.issues)
+		sub.Depth = 1
+		parent.SubWorkstreams = append(parent.SubWorkstreams, &sub)
+	}
+
+	if len(noSecondary) > 0 {
+		sub := m.buildWorkstreamFromIssues("Core", noSecondary)
+		sub.Depth = 1
+		parent.SubWorkstreams = append(parent.SubWorkstreams, &sub)
+	}
+}
+
+// buildGroupedByPriority groups issues by priority level
+func (m *LensDashboardModel) buildGroupedByPriority() []analysis.Workstream {
+	priorityNames := []string{"P0 Critical", "P1 High", "P2 Medium", "P3+ Other"}
+	groups := make([][]model.Issue, 4)
+
+	for _, issue := range m.allIssues {
+		if !m.primaryIDs[issue.ID] {
+			continue
+		}
+
+		var idx int
+		switch {
+		case issue.Priority == 0:
+			idx = 0
+		case issue.Priority == 1:
+			idx = 1
+		case issue.Priority == 2:
+			idx = 2
+		default:
+			idx = 3
+		}
+		groups[idx] = append(groups[idx], issue)
+	}
+
+	var result []analysis.Workstream
+	for i, issues := range groups {
+		if len(issues) > 0 {
+			ws := m.buildWorkstreamFromIssues(priorityNames[i], issues)
+			result = append(result, ws)
+		}
+	}
+	return result
+}
+
+// buildGroupedByStatus groups issues by status
+func (m *LensDashboardModel) buildGroupedByStatus() []analysis.Workstream {
+	statusNames := map[model.Status]string{
+		model.StatusOpen:       "Open",
+		model.StatusInProgress: "In Progress",
+		model.StatusBlocked:    "Blocked",
+		model.StatusClosed:     "Closed",
+	}
+	statusOrder := []model.Status{model.StatusOpen, model.StatusInProgress, model.StatusBlocked, model.StatusClosed}
+	groups := make(map[model.Status][]model.Issue)
+
+	for _, issue := range m.allIssues {
+		if !m.primaryIDs[issue.ID] {
+			continue
+		}
+		groups[issue.Status] = append(groups[issue.Status], issue)
+	}
+
+	var result []analysis.Workstream
+	for _, status := range statusOrder {
+		if issues, ok := groups[status]; ok && len(issues) > 0 {
+			ws := m.buildWorkstreamFromIssues(statusNames[status], issues)
+			result = append(result, ws)
+		}
+	}
+	return result
+}
+
+// buildGroupedSections builds the grouped sections based on current groupByMode
+func (m *LensDashboardModel) buildGroupedSections() {
+	switch m.groupByMode {
+	case GroupByLabel:
+		m.groupedSections = m.buildGroupedByLabel()
+	case GroupByPriority:
+		m.groupedSections = m.buildGroupedByPriority()
+	case GroupByStatus:
+		m.groupedSections = m.buildGroupedByStatus()
+	default:
+		m.groupedSections = m.buildGroupedByLabel()
+	}
+
+	// Initialize expansion state - expand first group by default
+	if m.groupedExpanded == nil {
+		m.groupedExpanded = make(map[int]bool)
+	}
+	if len(m.groupedSections) > 0 && len(m.groupedExpanded) == 0 {
+		m.groupedExpanded[0] = true
+	}
+
+	// Initialize sub-expansion state
+	if m.groupedSubExpanded == nil {
+		m.groupedSubExpanded = make(map[int]map[int]bool)
+	}
 }
 
 // getSelectedIDForCenteredMode returns the selected issue ID based on cursor position in centered mode
@@ -1722,21 +2163,17 @@ func (m *LensDashboardModel) GetAvailableScopeLabels() []string {
 	}
 
 	// Sort by count (descending)
-	type labelCount struct {
-		label string
-		count int
-	}
-	var sorted []labelCount
+	var sorted []LabelCount
 	for label, count := range cooccurring {
-		sorted = append(sorted, labelCount{label, count})
+		sorted = append(sorted, LabelCount{Label: label, Count: count})
 	}
 	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].count > sorted[j].count
+		return sorted[i].Count > sorted[j].Count
 	})
 
 	var result []string
 	for _, lc := range sorted {
-		result = append(result, lc.label)
+		result = append(result, lc.Label)
 	}
 	return result
 }
@@ -1845,12 +2282,21 @@ func (m *LensDashboardModel) HandleScopeInputKey(key string) (handled bool, stat
 func (m *LensDashboardModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
+	// Enable split view mode for wide terminals
+	m.splitViewMode = width >= LensSplitViewThreshold
 }
 
 // MoveUp moves cursor up
 func (m *LensDashboardModel) MoveUp() {
+	if m.viewType == ViewTypeGrouped && len(m.groupedSections) > 0 {
+		m.moveUpGrouped()
+		m.updateDetailContent()
+		return
+	}
+
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		m.moveUpWS()
+		m.updateDetailContent()
 		return
 	}
 
@@ -1859,6 +2305,8 @@ func (m *LensDashboardModel) MoveUp() {
 		if m.cursor > 0 {
 			m.cursor--
 			m.selectedIssueID = m.getSelectedIDForCenteredMode()
+			m.ensureCenteredVisible()
+			m.updateDetailContent()
 		}
 		return
 	}
@@ -1868,13 +2316,21 @@ func (m *LensDashboardModel) MoveUp() {
 		m.cursor--
 		m.selectedIssueID = m.flatNodes[m.cursor].Node.Issue.ID
 		m.ensureVisible()
+		m.updateDetailContent()
 	}
 }
 
 // MoveDown moves cursor down
 func (m *LensDashboardModel) MoveDown() {
+	if m.viewType == ViewTypeGrouped && len(m.groupedSections) > 0 {
+		m.moveDownGrouped()
+		m.updateDetailContent()
+		return
+	}
+
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		m.moveDownWS()
+		m.updateDetailContent()
 		return
 	}
 
@@ -1884,6 +2340,8 @@ func (m *LensDashboardModel) MoveDown() {
 		if m.cursor < totalNodes-1 {
 			m.cursor++
 			m.selectedIssueID = m.getSelectedIDForCenteredMode()
+			m.ensureCenteredVisible()
+			m.updateDetailContent()
 		}
 		return
 	}
@@ -1893,6 +2351,7 @@ func (m *LensDashboardModel) MoveDown() {
 		m.cursor++
 		m.selectedIssueID = m.flatNodes[m.cursor].Node.Issue.ID
 		m.ensureVisible()
+		m.updateDetailContent()
 	}
 }
 
@@ -1975,6 +2434,295 @@ func (m *LensDashboardModel) moveDownWS() {
 	m.updateSelectedIssueFromWS()
 }
 
+// moveUpGrouped moves cursor up in grouped view
+func (m *LensDashboardModel) moveUpGrouped() {
+	if len(m.groupedSections) == 0 {
+		return
+	}
+
+	group := m.groupedSections[m.groupedCursor]
+	_ = len(group.SubWorkstreams) > 0 && m.groupedExpanded[m.groupedCursor] // hasSubGroups used below
+
+	if m.groupedIssueCursor > 0 {
+		// Move up within current issues
+		m.groupedIssueCursor--
+	} else if m.groupedIssueCursor == 0 {
+		// At first issue, go to sub-group header (if in sub-group) or group header
+		m.groupedIssueCursor = -1
+	} else if m.groupedSubCursor >= 0 && len(group.SubWorkstreams) > 0 {
+		// At sub-group header, check previous sub-group or go to group header
+		if m.groupedSubCursor > 0 && m.groupedSubCursor <= len(group.SubWorkstreams) {
+			// Go to previous sub-group's last issue or header
+			m.groupedSubCursor--
+			subGroup := group.SubWorkstreams[m.groupedSubCursor]
+			if m.groupedSubExpanded[m.groupedCursor] != nil && m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor] && subGroup != nil {
+				m.groupedIssueCursor = len(subGroup.Issues) - 1
+				if m.groupedIssueCursor < 0 {
+					m.groupedIssueCursor = -1
+				}
+			} else {
+				m.groupedIssueCursor = -1
+			}
+		} else {
+			// At first sub-group, go to group header
+			m.groupedSubCursor = -1
+			m.groupedIssueCursor = -1
+		}
+	} else if m.groupedSubCursor >= 0 {
+		// Invalid state: sub-cursor set but no sub-groups, reset
+		m.groupedSubCursor = -1
+		m.groupedIssueCursor = -1
+	} else if m.groupedCursor > 0 {
+		// At group header, go to previous group
+		m.groupedCursor--
+		prevGroup := m.groupedSections[m.groupedCursor]
+		prevHasSubGroups := len(prevGroup.SubWorkstreams) > 0 && m.groupedExpanded[m.groupedCursor]
+
+		if prevHasSubGroups {
+			// Go to last sub-group
+			m.groupedSubCursor = len(prevGroup.SubWorkstreams) - 1
+			subGroup := prevGroup.SubWorkstreams[m.groupedSubCursor]
+			if m.groupedSubExpanded[m.groupedCursor] != nil && m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor] && subGroup != nil {
+				m.groupedIssueCursor = len(subGroup.Issues) - 1
+				if m.groupedIssueCursor < 0 {
+					m.groupedIssueCursor = -1
+				}
+			} else {
+				m.groupedIssueCursor = -1
+			}
+		} else if m.groupedExpanded[m.groupedCursor] && len(prevGroup.Issues) > 0 {
+			// Go to last issue in previous group
+			m.groupedSubCursor = -1
+			m.groupedIssueCursor = len(prevGroup.Issues) - 1
+		} else {
+			// Go to previous group header
+			m.groupedSubCursor = -1
+			m.groupedIssueCursor = -1
+		}
+	}
+
+	m.updateSelectedIssueFromGrouped()
+	m.ensureGroupedVisible()
+}
+
+// moveDownGrouped moves cursor down in grouped view
+func (m *LensDashboardModel) moveDownGrouped() {
+	if len(m.groupedSections) == 0 {
+		return
+	}
+
+	group := m.groupedSections[m.groupedCursor]
+	hasSubGroups := len(group.SubWorkstreams) > 0
+	isGroupExpanded := m.groupedExpanded[m.groupedCursor]
+
+	if m.groupedSubCursor >= 0 && len(group.SubWorkstreams) > m.groupedSubCursor {
+		// We're in a sub-group
+		subGroup := group.SubWorkstreams[m.groupedSubCursor]
+		isSubExpanded := m.groupedSubExpanded[m.groupedCursor] != nil && m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor]
+		subIssueCount := 0
+		if subGroup != nil {
+			subIssueCount = len(subGroup.Issues)
+		}
+
+		if m.groupedIssueCursor < 0 {
+			// At sub-group header
+			if isSubExpanded && subIssueCount > 0 {
+				m.groupedIssueCursor = 0
+			} else if m.groupedSubCursor < len(group.SubWorkstreams)-1 {
+				// Go to next sub-group
+				m.groupedSubCursor++
+				m.groupedIssueCursor = -1
+			} else if m.groupedCursor < len(m.groupedSections)-1 {
+				// Go to next group
+				m.groupedCursor++
+				m.groupedSubCursor = -1
+				m.groupedIssueCursor = -1
+			}
+		} else if m.groupedIssueCursor < subIssueCount-1 {
+			// Move down within sub-group issues
+			m.groupedIssueCursor++
+		} else if m.groupedSubCursor < len(group.SubWorkstreams)-1 {
+			// Go to next sub-group
+			m.groupedSubCursor++
+			m.groupedIssueCursor = -1
+		} else if m.groupedCursor < len(m.groupedSections)-1 {
+			// Go to next group
+			m.groupedCursor++
+			m.groupedSubCursor = -1
+			m.groupedIssueCursor = -1
+		}
+	} else if m.groupedSubCursor >= 0 {
+		// Invalid state: sub-cursor set but no sub-groups, reset and go to next group
+		m.groupedSubCursor = -1
+		m.groupedIssueCursor = -1
+		if m.groupedCursor < len(m.groupedSections)-1 {
+			m.groupedCursor++
+		}
+	} else if m.groupedIssueCursor >= 0 {
+		// We're in group issues (no sub-groups)
+		if m.groupedIssueCursor < len(group.Issues)-1 {
+			m.groupedIssueCursor++
+		} else if m.groupedCursor < len(m.groupedSections)-1 {
+			// Go to next group
+			m.groupedCursor++
+			m.groupedSubCursor = -1
+			m.groupedIssueCursor = -1
+		}
+	} else {
+		// At group header
+		if isGroupExpanded && hasSubGroups {
+			// Go to first sub-group
+			m.groupedSubCursor = 0
+			m.groupedIssueCursor = -1
+		} else if isGroupExpanded && len(group.Issues) > 0 {
+			// Go to first issue
+			m.groupedIssueCursor = 0
+		} else if m.groupedCursor < len(m.groupedSections)-1 {
+			// Go to next group
+			m.groupedCursor++
+			m.groupedSubCursor = -1
+			m.groupedIssueCursor = -1
+		}
+	}
+
+	m.updateSelectedIssueFromGrouped()
+	m.ensureGroupedVisible()
+}
+
+// getVisibleGroupedIssueCount returns the number of visible issues for a grouped section
+func (m *LensDashboardModel) getVisibleGroupedIssueCount(gIdx int) int {
+	if gIdx >= len(m.groupedSections) {
+		return 0
+	}
+	group := m.groupedSections[gIdx]
+	isExpanded := m.groupedExpanded[gIdx]
+
+	if !isExpanded {
+		return 0 // Collapsed: no issues visible
+	}
+
+	// If there are sub-groups, issues are shown within sub-groups
+	if len(group.SubWorkstreams) > 0 {
+		return 0 // Issues in sub-groups, not directly navigable at group level
+	}
+
+	return len(group.Issues)
+}
+
+// getTotalGroupedLines calculates total lines in grouped view
+func (m *LensDashboardModel) getTotalGroupedLines() int {
+	totalLines := 0
+	for i, group := range m.groupedSections {
+		totalLines++ // Header line
+		if m.groupedExpanded[i] {
+			if len(group.SubWorkstreams) == 0 {
+				totalLines += len(group.Issues)
+			} else {
+				for j, sub := range group.SubWorkstreams {
+					if sub == nil {
+						continue
+					}
+					totalLines++ // Sub-group header
+					if m.groupedSubExpanded[i] != nil && m.groupedSubExpanded[i][j] {
+						totalLines += len(sub.Issues)
+					}
+				}
+			}
+		}
+		totalLines++ // Empty line between groups
+	}
+	return totalLines
+}
+
+// ensureGroupedVisible ensures the current cursor position is visible
+func (m *LensDashboardModel) ensureGroupedVisible() {
+	// Calculate line position for current cursor
+	// This must match the rendering logic in renderGroupedView()
+	linePos := 0
+
+	for i := 0; i < m.groupedCursor; i++ {
+		linePos++ // Header line
+		if m.groupedExpanded[i] {
+			group := m.groupedSections[i]
+			if len(group.SubWorkstreams) == 0 {
+				// No sub-groups: just add issue count
+				linePos += len(group.Issues)
+			} else {
+				// Has sub-groups: add each sub-group header + expanded issues
+				for j, sub := range group.SubWorkstreams {
+					if sub == nil {
+						continue
+					}
+					linePos++ // Sub-group header
+					if m.groupedSubExpanded[i] != nil && m.groupedSubExpanded[i][j] {
+						linePos += len(sub.Issues)
+					}
+				}
+			}
+		}
+		linePos++ // Empty line between groups
+	}
+
+	// Add current group header
+	linePos++
+
+	// Handle position within current group
+	if m.groupedCursor >= 0 && m.groupedCursor < len(m.groupedSections) {
+		group := m.groupedSections[m.groupedCursor]
+
+		if m.groupedExpanded[m.groupedCursor] {
+			if len(group.SubWorkstreams) == 0 {
+				// No sub-groups: issue cursor directly under group
+				if m.groupedIssueCursor >= 0 {
+					linePos += m.groupedIssueCursor + 1
+				}
+			} else {
+				// Has sub-groups
+				if m.groupedSubCursor >= 0 {
+					// Add lines for sub-groups before current sub-cursor
+					for j := 0; j < m.groupedSubCursor && j < len(group.SubWorkstreams); j++ {
+						sub := group.SubWorkstreams[j]
+						if sub == nil {
+							continue
+						}
+						linePos++ // Sub-group header
+						if m.groupedSubExpanded[m.groupedCursor] != nil && m.groupedSubExpanded[m.groupedCursor][j] {
+							linePos += len(sub.Issues)
+						}
+					}
+					// Add current sub-group header
+					linePos++
+					// Add issue position within sub-group
+					if m.groupedIssueCursor >= 0 {
+						linePos += m.groupedIssueCursor + 1
+					}
+				}
+			}
+		}
+	}
+
+	// Calculate visible lines using viewport config
+	// renderGroupedView adds 2 lines for header, rest is content
+	vp := m.calculateViewport()
+	visibleLines := vp.ContentHeight - 2
+	if visibleLines < 5 {
+		visibleLines = 5
+	}
+
+	// Center cursor in viewport (scrolloff = half viewport height)
+	scrolloff := visibleLines / 2
+	targetScroll := linePos - scrolloff
+	if targetScroll < 0 {
+		targetScroll = 0
+	}
+
+	// NOTE: We intentionally do NOT clamp to maxScroll here.
+	// This allows the last items to be centered with empty space below them.
+	// The render function handles padding when scroll goes past content.
+
+	m.groupedScroll = targetScroll
+}
+
 // updateSelectedIssueFromWS updates selectedIssueID based on workstream cursor
 func (m *LensDashboardModel) updateSelectedIssueFromWS() {
 	if len(m.workstreams) == 0 {
@@ -2021,42 +2769,31 @@ func (m *LensDashboardModel) updateSelectedIssueFromWS() {
 	m.ensureVisibleWS()
 }
 
-// ensureVisibleWS adjusts wsScroll to keep cursor visible
+// ensureVisibleWS adjusts wsScroll to keep cursor centered in viewport
 func (m *LensDashboardModel) ensureVisibleWS() {
 	// Calculate the line number of the current cursor position
 	cursorLine := m.getWSCursorLine()
 
-	// Match the visible lines calculation from View() and renderWorkstreamView()
-	// View uses: visibleLines = m.height - 8
-	// renderWorkstreamView uses: endIdx = wsScroll + visibleLines - 4
-	// So effective visible content lines = (m.height - 8) - 4 = m.height - 12
-	visibleLines := m.height - 12
+	// Calculate visible lines using viewport config
+	// renderWorkstreamView adds 2 lines for header, rest is content
+	vp := m.calculateViewport()
+	visibleLines := vp.ContentHeight - 2
 	if visibleLines < 3 {
 		visibleLines = 3
 	}
 
-	// Scroll up if cursor is above visible area
-	if cursorLine < m.wsScroll {
-		m.wsScroll = cursorLine
+	// Center cursor in viewport (scrolloff = half viewport height)
+	scrolloff := visibleLines / 2
+	targetScroll := cursorLine - scrolloff
+	if targetScroll < 0 {
+		targetScroll = 0
 	}
 
-	// Scroll down if cursor is below visible area (keep 1 line margin)
-	if cursorLine >= m.wsScroll+visibleLines-1 {
-		m.wsScroll = cursorLine - visibleLines + 2
-	}
+	// NOTE: We intentionally do NOT clamp to maxScroll here.
+	// This allows the last items to be centered with empty space below them.
+	// The render function handles padding when scroll goes past content.
 
-	// Clamp scroll to valid range
-	totalLines := m.getTotalWSLines()
-	maxScroll := totalLines - visibleLines + 1
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	if m.wsScroll > maxScroll {
-		m.wsScroll = maxScroll
-	}
-	if m.wsScroll < 0 {
-		m.wsScroll = 0
-	}
+	m.wsScroll = targetScroll
 }
 
 // getWSCursorLine calculates the line number of the current cursor in workstream view
@@ -2131,18 +2868,120 @@ func (m *LensDashboardModel) getTotalWSLines() int {
 	return line
 }
 
-// ensureVisible adjusts scroll to keep cursor visible
+// getFlatLinePosition returns the line position for a given flatNodes index
+// accounting for status headers that appear when status changes
+func (m *LensDashboardModel) getFlatLinePosition(nodeIdx int) int {
+	if nodeIdx < 0 || len(m.flatNodes) == 0 {
+		return 0
+	}
+	if nodeIdx >= len(m.flatNodes) {
+		nodeIdx = len(m.flatNodes) - 1
+	}
+
+	linePos := 0
+	lastStatus := ""
+	for i := 0; i <= nodeIdx; i++ {
+		if m.flatNodes[i].Status != lastStatus {
+			linePos++ // status header
+			lastStatus = m.flatNodes[i].Status
+		}
+		if i < nodeIdx {
+			linePos++ // node line (don't count target node itself)
+		}
+	}
+	return linePos
+}
+
+// getTotalFlatLines returns total lines for flat view including status headers
+func (m *LensDashboardModel) getTotalFlatLines() int {
+	if len(m.flatNodes) == 0 {
+		return 0
+	}
+	lines := 0
+	lastStatus := ""
+	for _, fn := range m.flatNodes {
+		if fn.Status != lastStatus {
+			lines++ // status header
+			lastStatus = fn.Status
+		}
+		lines++ // node line
+	}
+	return lines
+}
+
+// ensureVisible adjusts scroll to keep cursor centered in viewport
+// NOTE: For flat view, m.scroll stores LINE position (not node index)
 func (m *LensDashboardModel) ensureVisible() {
-	visibleLines := m.height - 8 // header, stats, footer
+	if len(m.flatNodes) == 0 {
+		m.scroll = 0
+		return
+	}
+
+	vp := m.calculateViewport()
+	visibleLines := vp.ContentHeight
 	if visibleLines < 5 {
 		visibleLines = 5
 	}
 
-	if m.cursor < m.scroll {
-		m.scroll = m.cursor
-	} else if m.cursor >= m.scroll+visibleLines {
-		m.scroll = m.cursor - visibleLines + 1
+	// Get line position of cursor (accounting for status headers)
+	cursorLine := m.getFlatLinePosition(m.cursor)
+
+	// Center cursor in viewport (scrolloff = half viewport height)
+	scrolloff := visibleLines / 2
+	targetScrollLine := cursorLine - scrolloff
+	if targetScrollLine < 0 {
+		targetScrollLine = 0
 	}
+
+	// NOTE: We intentionally do NOT clamp to maxScrollLine here.
+	// This allows the last items to be centered with empty space below them.
+	// The render function handles padding when scroll goes past content.
+
+	m.scroll = targetScrollLine
+}
+
+// findNodeForLine finds the flatNodes index for a given line position
+func (m *LensDashboardModel) findNodeForLine(targetLine int) int {
+	if len(m.flatNodes) == 0 || targetLine <= 0 {
+		return 0
+	}
+
+	linePos := 0
+	lastStatus := ""
+	for i, fn := range m.flatNodes {
+		if fn.Status != lastStatus {
+			linePos++ // status header
+			lastStatus = fn.Status
+		}
+		if linePos >= targetLine {
+			return i
+		}
+		linePos++ // node line
+	}
+	return len(m.flatNodes) - 1
+}
+
+// ensureCenteredVisible adjusts scroll to keep cursor visible in centered mode
+func (m *LensDashboardModel) ensureCenteredVisible() {
+	if !m.centeredMode || m.egoNode == nil {
+		return
+	}
+
+	vp := m.calculateViewport()
+	visibleLines := vp.ContentHeight
+
+	// Center cursor in viewport (scrolloff = half viewport height)
+	scrolloff := visibleLines / 2
+	targetScroll := m.cursor - scrolloff
+	if targetScroll < 0 {
+		targetScroll = 0
+	}
+
+	// NOTE: We intentionally do NOT clamp to maxScroll here.
+	// This allows the last items to be centered with empty space below them.
+	// The render function handles padding when scroll goes past content.
+
+	m.scroll = targetScroll
 }
 
 // NextSection jumps to next status group
@@ -2232,8 +3071,371 @@ func (m *LensDashboardModel) ToggleViewType() {
 		m.wsCursor = 0
 		m.wsIssueCursor = -1
 		m.updateSelectedIssueFromWS()
+	} else if m.viewType == ViewTypeGrouped {
+		// From grouped view, go to workstream view
+		m.viewType = ViewTypeWorkstream
+		m.wsCursor = 0
+		m.wsIssueCursor = -1
+		m.updateSelectedIssueFromWS()
 	} else {
+		// From workstream view, go to flat view
 		m.viewType = ViewTypeFlat
+	}
+}
+
+// IsGroupedView returns true if in grouped view mode
+func (m *LensDashboardModel) IsGroupedView() bool {
+	return m.viewType == ViewTypeGrouped
+}
+
+// EnterGroupedView switches to grouped view mode
+func (m *LensDashboardModel) EnterGroupedView() {
+	m.viewType = ViewTypeGrouped
+	// Build grouped sections
+	m.buildGroupedSections()
+	// Initialize cursor to first group header
+	m.groupedCursor = 0
+	m.groupedSubCursor = -1
+	m.groupedIssueCursor = -1
+	m.groupedScroll = 0
+	// Update selected issue
+	m.updateSelectedIssueFromGrouped()
+}
+
+// ExitGroupedView switches back to flat view mode
+func (m *LensDashboardModel) ExitGroupedView() {
+	m.viewType = ViewTypeFlat
+}
+
+// CycleGroupByMode cycles through grouping modes: Label -> Priority -> Status -> Label
+func (m *LensDashboardModel) CycleGroupByMode() {
+	switch m.groupByMode {
+	case GroupByLabel:
+		m.groupByMode = GroupByPriority
+	case GroupByPriority:
+		m.groupByMode = GroupByStatus
+	case GroupByStatus:
+		m.groupByMode = GroupByLabel
+	default:
+		m.groupByMode = GroupByLabel
+	}
+	// Rebuild grouped sections with new mode
+	m.buildGroupedSections()
+	// Reset cursor
+	m.groupedCursor = 0
+	m.groupedIssueCursor = -1
+	m.groupedScroll = 0
+	m.updateSelectedIssueFromGrouped()
+}
+
+// GetGroupByMode returns the current grouping mode
+func (m *LensDashboardModel) GetGroupByMode() GroupByMode {
+	return m.groupByMode
+}
+
+// updateSelectedIssueFromGrouped updates the selected issue ID based on grouped view cursor
+func (m *LensDashboardModel) updateSelectedIssueFromGrouped() {
+	if m.groupedIssueCursor < 0 {
+		// On group or sub-group header, no specific issue selected
+		m.selectedIssueID = ""
+		return
+	}
+
+	if m.groupedCursor < 0 || m.groupedCursor >= len(m.groupedSections) {
+		m.selectedIssueID = ""
+		return
+	}
+
+	group := m.groupedSections[m.groupedCursor]
+
+	// Check if we're in a sub-group
+	if m.groupedSubCursor >= 0 && m.groupedSubCursor < len(group.SubWorkstreams) {
+		subGroup := group.SubWorkstreams[m.groupedSubCursor]
+		if subGroup != nil && m.groupedIssueCursor < len(subGroup.Issues) {
+			m.selectedIssueID = subGroup.Issues[m.groupedIssueCursor].ID
+		} else {
+			m.selectedIssueID = ""
+		}
+		return
+	}
+
+	// Not in sub-group, check group issues
+	if m.groupedIssueCursor < len(group.Issues) {
+		m.selectedIssueID = group.Issues[m.groupedIssueCursor].ID
+	} else {
+		m.selectedIssueID = ""
+	}
+}
+
+// ToggleGroupedExpand toggles expansion of the current grouped section or sub-group
+func (m *LensDashboardModel) ToggleGroupedExpand() {
+	if m.groupedCursor < 0 || m.groupedCursor >= len(m.groupedSections) {
+		return
+	}
+
+	group := m.groupedSections[m.groupedCursor]
+
+	// Check if we're on a sub-group header
+	if m.groupedSubCursor >= 0 && m.groupedSubCursor < len(group.SubWorkstreams) && m.groupedIssueCursor < 0 {
+		// Toggle sub-group expansion
+		if m.groupedSubExpanded[m.groupedCursor] == nil {
+			m.groupedSubExpanded[m.groupedCursor] = make(map[int]bool)
+		}
+		m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor] = !m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor]
+		return
+	}
+
+	// Toggle group expansion
+	if m.groupedIssueCursor < 0 && m.groupedSubCursor < 0 {
+		m.groupedExpanded[m.groupedCursor] = !m.groupedExpanded[m.groupedCursor]
+		// If collapsing, reset sub-cursor
+		if !m.groupedExpanded[m.groupedCursor] {
+			m.groupedIssueCursor = -1
+		}
+	}
+}
+
+// ToggleGroupedTreeView toggles tree view within grouped sections
+func (m *LensDashboardModel) ToggleGroupedTreeView() {
+	m.groupedTreeView = !m.groupedTreeView
+}
+
+// IsGroupedTreeView returns true if tree view is enabled for grouped sections
+func (m *LensDashboardModel) IsGroupedTreeView() bool {
+	return m.groupedTreeView
+}
+
+// IsGroupExpanded returns true if the group at the given index is expanded
+func (m *LensDashboardModel) IsGroupExpanded(idx int) bool {
+	return m.groupedExpanded[idx]
+}
+
+// GetGroupedCursor returns the current grouped view cursor position
+func (m *LensDashboardModel) GetGroupedCursor() int {
+	return m.groupedCursor
+}
+
+// CurrentGroupName returns the name of the currently selected group
+func (m *LensDashboardModel) CurrentGroupName() string {
+	if m.groupedCursor >= 0 && m.groupedCursor < len(m.groupedSections) {
+		return m.groupedSections[m.groupedCursor].Name
+	}
+	return ""
+}
+
+// NextGroup moves to the next group or sub-group with auto-expand/collapse
+func (m *LensDashboardModel) NextGroup() {
+	if m.groupedCursor < 0 || m.groupedCursor >= len(m.groupedSections) {
+		return
+	}
+
+	group := m.groupedSections[m.groupedCursor]
+
+	// If on an issue, jump to the header (sub-group or group)
+	if m.groupedIssueCursor >= 0 {
+		m.groupedIssueCursor = -1
+		m.updateSelectedIssueFromGrouped()
+		m.ensureGroupedVisible()
+		return
+	}
+
+	// If on a sub-group header
+	if m.groupedSubCursor >= 0 && len(group.SubWorkstreams) > 0 {
+		// Collapse current sub-group
+		if m.groupedSubExpanded[m.groupedCursor] != nil {
+			m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor] = false
+		}
+
+		// Try to go to next sub-group
+		if m.groupedSubCursor < len(group.SubWorkstreams)-1 {
+			m.groupedSubCursor++
+			// Expand new sub-group
+			if m.groupedSubExpanded[m.groupedCursor] == nil {
+				m.groupedSubExpanded[m.groupedCursor] = make(map[int]bool)
+			}
+			m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor] = true
+			m.groupedIssueCursor = -1
+			m.updateSelectedIssueFromGrouped()
+			m.ensureGroupedVisible()
+			return
+		}
+		// At last sub-group, go to next group
+		m.groupedSubCursor = -1
+	}
+
+	// On group header - check if we should enter sub-groups
+	if !m.groupedExpanded[m.groupedCursor] {
+		// Expand current group and enter first sub-group (if any)
+		m.groupedExpanded[m.groupedCursor] = true
+		if len(group.SubWorkstreams) > 0 {
+			m.groupedSubCursor = 0
+			if m.groupedSubExpanded[m.groupedCursor] == nil {
+				m.groupedSubExpanded[m.groupedCursor] = make(map[int]bool)
+			}
+			m.groupedSubExpanded[m.groupedCursor][0] = true
+		}
+		m.updateSelectedIssueFromGrouped()
+		m.ensureGroupedVisible()
+		return
+	}
+
+	// Already expanded - if has sub-groups and not in them yet, enter first sub-group
+	if m.groupedSubCursor < 0 && len(group.SubWorkstreams) > 0 && m.groupedExpanded[m.groupedCursor] {
+		m.groupedSubCursor = 0
+		if m.groupedSubExpanded[m.groupedCursor] == nil {
+			m.groupedSubExpanded[m.groupedCursor] = make(map[int]bool)
+		}
+		m.groupedSubExpanded[m.groupedCursor][0] = true
+		m.updateSelectedIssueFromGrouped()
+		m.ensureGroupedVisible()
+		return
+	}
+
+	// Move to next group
+	if m.groupedCursor < len(m.groupedSections)-1 {
+		m.groupedCursor++
+		m.groupedIssueCursor = -1
+		m.groupedSubCursor = -1
+		m.updateSelectedIssueFromGrouped()
+		m.ensureGroupedVisible()
+	}
+}
+
+// PrevGroup moves to the previous group or sub-group with auto-expand/collapse
+func (m *LensDashboardModel) PrevGroup() {
+	if m.groupedCursor < 0 || m.groupedCursor >= len(m.groupedSections) {
+		return
+	}
+
+	group := m.groupedSections[m.groupedCursor]
+
+	// If on an issue, jump to the header (sub-group or group)
+	if m.groupedIssueCursor >= 0 {
+		m.groupedIssueCursor = -1
+		m.updateSelectedIssueFromGrouped()
+		m.ensureGroupedVisible()
+		return
+	}
+
+	// If on a sub-group header
+	if m.groupedSubCursor >= 0 && len(group.SubWorkstreams) > 0 {
+		// Collapse current sub-group
+		if m.groupedSubExpanded[m.groupedCursor] != nil {
+			m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor] = false
+		}
+
+		// Try to go to previous sub-group
+		if m.groupedSubCursor > 0 {
+			m.groupedSubCursor--
+			// Expand new sub-group
+			if m.groupedSubExpanded[m.groupedCursor] == nil {
+				m.groupedSubExpanded[m.groupedCursor] = make(map[int]bool)
+			}
+			m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor] = true
+			m.groupedIssueCursor = -1
+			m.updateSelectedIssueFromGrouped()
+			m.ensureGroupedVisible()
+			return
+		}
+		// At first sub-group, go to group header
+		m.groupedSubCursor = -1
+		m.groupedIssueCursor = -1
+		m.updateSelectedIssueFromGrouped()
+		m.ensureGroupedVisible()
+		return
+	}
+
+	// On group header - move to previous group
+	if m.groupedCursor > 0 {
+		m.groupedCursor--
+		m.groupedIssueCursor = -1
+		// If previous group has sub-groups and is expanded, go to last sub-group
+		prevGroup := m.groupedSections[m.groupedCursor]
+		if m.groupedExpanded[m.groupedCursor] && len(prevGroup.SubWorkstreams) > 0 {
+			m.groupedSubCursor = len(prevGroup.SubWorkstreams) - 1
+			// Expand the last sub-group
+			if m.groupedSubExpanded[m.groupedCursor] == nil {
+				m.groupedSubExpanded[m.groupedCursor] = make(map[int]bool)
+			}
+			m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor] = true
+		} else {
+			m.groupedSubCursor = -1
+		}
+		m.updateSelectedIssueFromGrouped()
+		m.ensureGroupedVisible()
+	}
+}
+
+// ExpandGroup expands the current group (does not collapse)
+func (m *LensDashboardModel) ExpandGroup() {
+	if m.groupedCursor >= 0 && m.groupedCursor < len(m.groupedSections) {
+		m.groupedExpanded[m.groupedCursor] = true
+	}
+}
+
+// ExpandAllGroups expands all groups and sub-groups
+func (m *LensDashboardModel) ExpandAllGroups() {
+	for i := range m.groupedSections {
+		m.groupedExpanded[i] = true
+		// Also expand all sub-groups
+		if m.groupedSubExpanded[i] == nil {
+			m.groupedSubExpanded[i] = make(map[int]bool)
+		}
+		for j := range m.groupedSections[i].SubWorkstreams {
+			m.groupedSubExpanded[i][j] = true
+		}
+	}
+}
+
+// CollapseAllGroups collapses all groups and sub-groups
+func (m *LensDashboardModel) CollapseAllGroups() {
+	for i := range m.groupedSections {
+		m.groupedExpanded[i] = false
+		// Also collapse all sub-groups
+		if m.groupedSubExpanded[i] != nil {
+			for j := range m.groupedSubExpanded[i] {
+				m.groupedSubExpanded[i][j] = false
+			}
+		}
+	}
+	// Reset cursor to group level
+	m.groupedIssueCursor = -1
+	m.groupedSubCursor = -1
+}
+
+// ExpandAllWorkstreams expands all workstreams
+func (m *LensDashboardModel) ExpandAllWorkstreams() {
+	for i := range m.workstreams {
+		m.wsExpanded[i] = true
+		// Also expand all sub-workstreams
+		if m.subWSExpanded[i] == nil {
+			m.subWSExpanded[i] = make(map[int]bool)
+		}
+		if len(m.workstreams[i].SubWorkstreams) > 0 {
+			for j := range m.workstreams[i].SubWorkstreams {
+				m.subWSExpanded[i][j] = true
+			}
+		}
+	}
+}
+
+// CollapseAllWorkstreams collapses all workstreams
+func (m *LensDashboardModel) CollapseAllWorkstreams() {
+	for i := range m.workstreams {
+		m.wsExpanded[i] = false
+		// Also collapse all sub-workstreams
+		if m.subWSExpanded[i] != nil {
+			for j := range m.subWSExpanded[i] {
+				m.subWSExpanded[i][j] = false
+			}
+		}
+	}
+	// Reset cursor to workstream level
+	m.wsIssueCursor = -1
+	if m.subWsCursor != nil {
+		for k := range m.subWsCursor {
+			m.subWsCursor[k] = -1
+		}
 	}
 }
 
@@ -2400,32 +3602,74 @@ func (m *LensDashboardModel) GetWsCursor() int {
 	return m.wsCursor
 }
 
-// NextWorkstream moves to the next workstream
+// NextWorkstream moves to the next workstream with auto-expand/collapse
 func (m *LensDashboardModel) NextWorkstream() {
 	if len(m.workstreams) == 0 {
 		return
 	}
+
+	// If on an issue, jump to the workstream header first
+	if m.wsIssueCursor >= 0 {
+		m.wsIssueCursor = -1
+		m.updateSelectedIssueFromWS()
+		return
+	}
+
+	// Move to next workstream
 	if m.wsCursor < len(m.workstreams)-1 {
+		// Collapse current workstream
+		m.wsExpanded[m.wsCursor] = false
+
 		m.wsCursor++
 		m.wsIssueCursor = -1 // Go to header
+
+		// Expand new workstream
+		m.wsExpanded[m.wsCursor] = true
+
 		m.updateSelectedIssueFromWS()
 	}
 }
 
-// PrevWorkstream moves to the previous workstream
+// PrevWorkstream moves to the previous workstream with auto-expand/collapse
 func (m *LensDashboardModel) PrevWorkstream() {
 	if len(m.workstreams) == 0 {
 		return
 	}
+
+	// If on an issue, jump to the workstream header first
+	if m.wsIssueCursor >= 0 {
+		m.wsIssueCursor = -1
+		m.updateSelectedIssueFromWS()
+		return
+	}
+
+	// Move to previous workstream
 	if m.wsCursor > 0 {
+		// Collapse current workstream
+		m.wsExpanded[m.wsCursor] = false
+
 		m.wsCursor--
 		m.wsIssueCursor = -1 // Go to header
+
+		// Expand new workstream
+		m.wsExpanded[m.wsCursor] = true
+
 		m.updateSelectedIssueFromWS()
 	}
 }
 
 // GoToTop moves cursor to the first item
 func (m *LensDashboardModel) GoToTop() {
+	// Grouped view
+	if m.viewType == ViewTypeGrouped && len(m.groupedSections) > 0 {
+		m.groupedCursor = 0
+		m.groupedSubCursor = -1
+		m.groupedIssueCursor = -1
+		m.groupedScroll = 0
+		m.updateSelectedIssueFromGrouped()
+		return
+	}
+
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		m.wsCursor = 0
 		m.wsIssueCursor = -1 // Go to first workstream header
@@ -2451,6 +3695,42 @@ func (m *LensDashboardModel) GoToTop() {
 
 // GoToBottom moves cursor to the last item
 func (m *LensDashboardModel) GoToBottom() {
+	// Grouped view
+	if m.viewType == ViewTypeGrouped && len(m.groupedSections) > 0 {
+		m.groupedCursor = len(m.groupedSections) - 1
+		group := m.groupedSections[m.groupedCursor]
+
+		// Navigate to last item in last group
+		if m.groupedExpanded[m.groupedCursor] {
+			if len(group.SubWorkstreams) > 0 {
+				m.groupedSubCursor = len(group.SubWorkstreams) - 1
+				// Navigate to last issue in last subgroup if expanded
+				if m.groupedSubExpanded[m.groupedCursor] != nil && m.groupedSubExpanded[m.groupedCursor][m.groupedSubCursor] {
+					subGroup := group.SubWorkstreams[m.groupedSubCursor]
+					if subGroup != nil && len(subGroup.Issues) > 0 {
+						m.groupedIssueCursor = len(subGroup.Issues) - 1
+					} else {
+						m.groupedIssueCursor = -1
+					}
+				} else {
+					m.groupedIssueCursor = -1
+				}
+			} else if len(group.Issues) > 0 {
+				m.groupedSubCursor = -1
+				m.groupedIssueCursor = len(group.Issues) - 1
+			} else {
+				m.groupedSubCursor = -1
+				m.groupedIssueCursor = -1
+			}
+		} else {
+			m.groupedSubCursor = -1
+			m.groupedIssueCursor = -1
+		}
+		m.ensureGroupedVisible()
+		m.updateSelectedIssueFromGrouped()
+		return
+	}
+
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		m.wsCursor = len(m.workstreams) - 1
 		// Go to last visible issue in last workstream
@@ -2469,6 +3749,7 @@ func (m *LensDashboardModel) GoToBottom() {
 		totalNodes := m.getTotalCenteredNodeCount()
 		m.cursor = totalNodes - 1
 		m.selectedIssueID = m.getSelectedIDForCenteredMode()
+		m.ensureCenteredVisible()
 		return
 	}
 
@@ -2503,6 +3784,7 @@ func (m *LensDashboardModel) PageDown() {
 			m.cursor = totalNodes - 1
 		}
 		m.selectedIssueID = m.getSelectedIDForCenteredMode()
+		m.ensureCenteredVisible()
 		return
 	}
 
@@ -2539,6 +3821,7 @@ func (m *LensDashboardModel) PageUp() {
 			m.cursor = 0
 		}
 		m.selectedIssueID = m.getSelectedIDForCenteredMode()
+		m.ensureCenteredVisible()
 		return
 	}
 
@@ -2662,8 +3945,22 @@ func (m *LensDashboardModel) buildWSTreeNode(issue *model.Issue, depth, maxDepth
 	return node
 }
 
+// fixRootsStructure corrects IsLastChild and ParentPath values for a set of roots.
+// Same as fixTreeStructure but works on a provided slice instead of m.roots.
+func (m *LensDashboardModel) fixRootsStructure(roots []*LensTreeNode) {
+	for i, root := range roots {
+		isLast := i == len(roots)-1
+		root.IsLastChild = isLast
+		root.ParentPath = nil
+		m.fixNodeChildren(root, nil)
+	}
+}
+
 // flattenWSTree converts workstream tree to flat list for display
 func (m *LensDashboardModel) flattenWSTree(roots []*LensTreeNode) []LensFlatNode {
+	// Fix tree structure before flattening
+	m.fixRootsStructure(roots)
+
 	var flatNodes []LensFlatNode
 	for _, root := range roots {
 		m.flattenWSTreeNode(root, &flatNodes)
@@ -2690,6 +3987,11 @@ func (m *LensDashboardModel) flattenWSTreeNode(node *LensTreeNode, flatNodes *[]
 
 // View renders the dashboard
 func (m *LensDashboardModel) View() string {
+	// Use split view for wide terminals
+	if m.splitViewMode {
+		return m.renderSplitView()
+	}
+
 	t := m.theme
 
 	var lines []string
@@ -2799,54 +4101,35 @@ func (m *LensDashboardModel) View() string {
 
 	lines = append(lines, "")
 
-	// Calculate visible area
-	visibleLines := m.height - 8
-	if visibleLines < 5 {
-		visibleLines = 5
-	}
+	// Calculate visible area using viewport config
+	vp := m.calculateViewport()
+	visibleLines := vp.ContentHeight
 
 	// Render based on view type
-	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
+	var contentLines []string
+	if m.viewType == ViewTypeGrouped && len(m.groupedSections) > 0 {
+		// Render grouped view
+		contentLines = m.renderGroupedView(contentWidth, visibleLines, statsStyle)
+	} else if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		// Render workstream view
-		lines = append(lines, m.renderWorkstreamView(contentWidth, visibleLines, statsStyle)...)
+		contentLines = m.renderWorkstreamView(contentWidth, visibleLines, statsStyle)
 	} else if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
 		// Render ego-centered view for epic/bead modes
-		lines = append(lines, m.renderCenteredView(contentWidth, visibleLines, statsStyle)...)
+		contentLines = m.renderCenteredView(contentWidth, visibleLines, statsStyle)
 	} else {
 		// Render flat tree view
-		if len(m.flatNodes) == 0 {
-			emptyStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Italic(true)
-			lines = append(lines, emptyStyle.Render("  No issues found"))
-		} else {
-			// Render visible portion
-			endIdx := m.scroll + visibleLines
-			if endIdx > len(m.flatNodes) {
-				endIdx = len(m.flatNodes)
-			}
-
-			lastStatus := ""
-			for i := m.scroll; i < endIdx; i++ {
-				fn := m.flatNodes[i]
-
-				// Show status header when status changes
-				if fn.Status != lastStatus {
-					statusHeader := m.renderStatusHeader(fn.Status)
-					lines = append(lines, statusHeader)
-					lastStatus = fn.Status
-				}
-
-				isSelected := i == m.cursor
-				line := m.renderTreeNode(fn, isSelected, contentWidth)
-				lines = append(lines, line)
-			}
-
-			// Show scroll indicator if needed
-			if len(m.flatNodes) > visibleLines {
-				scrollInfo := fmt.Sprintf("  [%d-%d of %d]", m.scroll+1, endIdx, len(m.flatNodes))
-				lines = append(lines, statsStyle.Render(scrollInfo))
-			}
-		}
+		contentLines = m.renderFlatView(contentWidth, visibleLines, statsStyle)
 	}
+
+	// Truncate content to exactly ContentHeight for fixed footer positioning
+	if len(contentLines) > visibleLines {
+		contentLines = contentLines[:visibleLines]
+	}
+	// Pad if needed
+	for len(contentLines) < visibleLines {
+		contentLines = append(contentLines, "")
+	}
+	lines = append(lines, contentLines...)
 
 	// Footer
 	lines = append(lines, "")
@@ -2882,14 +4165,74 @@ func (m *LensDashboardModel) View() string {
 	return strings.Join(lines, "\n")
 }
 
+// renderFlatView renders the flat tree view using line-based scrolling
+func (m *LensDashboardModel) renderFlatView(contentWidth, visibleLines int, statsStyle lipgloss.Style) []string {
+	t := m.theme
+
+	if len(m.flatNodes) == 0 {
+		emptyStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Italic(true)
+		return []string{emptyStyle.Render("  No issues found")}
+	}
+
+	// Build ALL lines first (including status headers)
+	var allLines []string
+	lastStatus := ""
+	for i, fn := range m.flatNodes {
+		// Add status header when status changes
+		if fn.Status != lastStatus {
+			statusHeader := m.renderStatusHeader(fn.Status)
+			allLines = append(allLines, statusHeader)
+			lastStatus = fn.Status
+		}
+
+		isSelected := i == m.cursor
+		line := m.renderTreeNode(fn, isSelected, contentWidth)
+		allLines = append(allLines, line)
+	}
+
+	// Add header lines (matching workstream/grouped views pattern)
+	var lines []string
+	viewModeStr := fmt.Sprintf("tree [depth:%s]", m.dependencyDepth.String())
+	lines = append(lines, statsStyle.Render(fmt.Sprintf("  %d issues (%s):", len(m.flatNodes), viewModeStr)))
+	lines = append(lines, "")
+
+	// Calculate visible window (2 lines for header above, rest for content)
+	contentLines := visibleLines - 2
+	if contentLines < 1 {
+		contentLines = 1
+	}
+
+	// m.scroll is already a LINE position (set by ensureVisible)
+	scrollLine := m.scroll
+	if scrollLine < 0 {
+		scrollLine = 0
+	}
+
+	// Add visible content lines
+	if scrollLine < len(allLines) {
+		endLine := scrollLine + contentLines
+		if endLine > len(allLines) {
+			endLine = len(allLines)
+		}
+		for i := scrollLine; i < endLine; i++ {
+			lines = append(lines, allLines[i])
+		}
+	}
+
+	// Pad to exactly visibleLines
+	for len(lines) < visibleLines {
+		lines = append(lines, "")
+	}
+
+	return lines
+}
+
 // renderCenteredView renders the ego-centered layout for epic/bead modes:
 // Upstream blockers → Entry point (center) → Downstream descendants
 func (m *LensDashboardModel) renderCenteredView(contentWidth, visibleLines int, statsStyle lipgloss.Style) []string {
 	t := m.theme
-	var allLines []string
 
 	upstreamLen := len(m.upstreamNodes)
-	totalNodes := m.getTotalCenteredNodeCount()
 
 	// Elegant section header styles with gradient colors
 	upstreamIconStyle := t.Renderer.NewStyle().Foreground(t.Blocked).Bold(true)
@@ -2908,34 +4251,40 @@ func (m *LensDashboardModel) renderCenteredView(contentWidth, visibleLines int, 
 		return iconStyled + " " + sectionLabelStyle.Render(label) + " " + separatorStyle.Render(line)
 	}
 
+	// Build ALL lines first (including headers, decorations, etc.)
+	var allLines []string
+	nodeIdx := 0
+
 	// === UPSTREAM SECTION (blockers) ===
 	if len(m.upstreamNodes) > 0 {
 		header := renderSectionHeader("◇", upstreamIconStyle.Render("◇"), "BLOCKERS", min(contentWidth, 50))
 		allLines = append(allLines, header)
 
-		for i, fn := range m.upstreamNodes {
-			isSelected := i == m.cursor
+		for _, fn := range m.upstreamNodes {
+			isSelected := nodeIdx == m.cursor
 			line := m.renderCenteredNode(fn, isSelected, contentWidth, -1)
 			allLines = append(allLines, line)
+			nodeIdx++
 		}
 		allLines = append(allLines, "")
 	}
 
 	// === CENTER SECTION (entry point/ego) with elegant top/bottom lines ===
 	if m.egoNode != nil {
-		// Simple elegant lines - no side borders
 		lineWidth := min(contentWidth-4, 50)
 		topLine := boxStyle.Render("═" + strings.Repeat("═", lineWidth) + "═")
 		bottomLine := boxStyle.Render("─" + strings.Repeat("─", lineWidth) + "─")
 
 		allLines = append(allLines, topLine)
 
-		isSelected := m.cursor == upstreamLen
+		egoNodeIdx := upstreamLen
+		isSelected := m.cursor == egoNodeIdx
 		line := m.renderEgoNodeLine(*m.egoNode, isSelected, contentWidth)
 		allLines = append(allLines, line)
 
 		allLines = append(allLines, bottomLine)
 		allLines = append(allLines, "")
+		nodeIdx = upstreamLen + 1
 	}
 
 	// === DOWNSTREAM SECTION (children/dependents) ===
@@ -2945,9 +4294,7 @@ func (m *LensDashboardModel) renderCenteredView(contentWidth, visibleLines int, 
 
 		lastStatus := ""
 		for i, fn := range m.flatNodes {
-			// Calculate actual cursor position (offset by upstream + ego)
 			cursorPos := upstreamLen + 1 + i
-			isSelected := cursorPos == m.cursor
 
 			// Show status header when status changes
 			if fn.Status != lastStatus {
@@ -2956,6 +4303,7 @@ func (m *LensDashboardModel) renderCenteredView(contentWidth, visibleLines int, 
 				lastStatus = fn.Status
 			}
 
+			isSelected := cursorPos == m.cursor
 			line := m.renderCenteredNode(fn, isSelected, contentWidth, fn.Node.RelativeDepth)
 			allLines = append(allLines, line)
 		}
@@ -2964,13 +4312,35 @@ func (m *LensDashboardModel) renderCenteredView(contentWidth, visibleLines int, 
 		allLines = append(allLines, emptyStyle.Render("  No descendants found"))
 	}
 
-	// Show scroll indicator if needed
-	if totalNodes > visibleLines {
-		scrollInfo := fmt.Sprintf("  [cursor %d of %d]", m.cursor+1, totalNodes)
-		allLines = append(allLines, statsStyle.Render(scrollInfo))
+	// Now apply scroll and buffer (matching flat view pattern)
+	var lines []string
+	contentLines := visibleLines - 2
+	if contentLines < 1 {
+		contentLines = 1
 	}
 
-	return allLines
+	scrollLine := m.scroll
+	if scrollLine < 0 {
+		scrollLine = 0
+	}
+
+	// Add visible content lines
+	if scrollLine < len(allLines) {
+		endLine := scrollLine + contentLines
+		if endLine > len(allLines) {
+			endLine = len(allLines)
+		}
+		for i := scrollLine; i < endLine; i++ {
+			lines = append(lines, allLines[i])
+		}
+	}
+
+	// Pad to exactly visibleLines
+	for len(lines) < visibleLines {
+		lines = append(lines, "")
+	}
+
+	return lines
 }
 
 // renderEgoNodeLine renders the center/ego node with prominent styling
@@ -3000,9 +4370,9 @@ func (m *LensDashboardModel) renderEgoNodeLine(fn LensFlatNode, isSelected bool,
 	}
 	title := truncateRunesHelper(node.Issue.Title, maxTitleLen, "…")
 
-	// Status indicator
+	// Status indicator (only show if blocker not already visible in tree)
 	statusSuffix := ""
-	if fn.Status == "blocked" && fn.BlockedBy != "" {
+	if fn.Status == "blocked" && fn.BlockedBy != "" && !fn.BlockerInTree {
 		blockerStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
 		statusSuffix = blockerStyle.Render(" ◄ " + fn.BlockedBy)
 	}
@@ -3090,9 +4460,9 @@ func (m *LensDashboardModel) renderCenteredNode(fn LensFlatNode, isSelected bool
 	}
 	title := truncateRunesHelper(node.Issue.Title, maxTitleLen, "…")
 
-	// Status indicator for blocked items
+	// Status indicator for blocked items (only show if blocker not already visible in tree)
 	statusSuffix := ""
-	if fn.Status == "blocked" && fn.BlockedBy != "" {
+	if fn.Status == "blocked" && fn.BlockedBy != "" && !fn.BlockerInTree {
 		blockerStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
 		statusSuffix = blockerStyle.Render(" ◄ " + fn.BlockedBy)
 	}
@@ -3345,29 +4715,30 @@ func (m *LensDashboardModel) renderWorkstreamView(contentWidth, visibleLines int
 	lines = append(lines, wsSubStyle.Render(fmt.Sprintf("  %d workstreams (%s):", len(m.workstreams), viewModeStr)))
 	lines = append(lines, "")
 
-	// Calculate visible window
+	// Calculate visible window (2 lines for header above, rest for content)
+	totalLines := len(allLines)
+	contentLines := visibleLines - 2
+
 	startIdx := m.wsScroll
-	endIdx := m.wsScroll + visibleLines - 4 // Account for header lines
 	if startIdx < 0 {
 		startIdx = 0
 	}
-	if endIdx > len(allLines) {
-		endIdx = len(allLines)
-	}
-	if startIdx > len(allLines) {
-		startIdx = len(allLines)
+
+	// Add visible content lines
+	if startIdx < totalLines {
+		endIdx := startIdx + contentLines
+		if endIdx > totalLines {
+			endIdx = totalLines
+		}
+		for i := startIdx; i < endIdx; i++ {
+			lines = append(lines, allLines[i])
+		}
 	}
 
-	// Add visible lines
-	for i := startIdx; i < endIdx; i++ {
-		lines = append(lines, allLines[i])
-	}
-
-	// Show scroll indicator if needed
-	totalLines := len(allLines)
-	if totalLines > visibleLines-4 {
-		scrollInfo := fmt.Sprintf("  [%d-%d of %d lines]", startIdx+1, endIdx, totalLines)
-		lines = append(lines, wsSubStyle.Render(scrollInfo))
+	// Pad with empty lines to allow empty space after list end
+	// This ensures the last items can be centered with empty space below
+	for len(lines) < visibleLines {
+		lines = append(lines, "")
 	}
 
 	return lines
@@ -3393,6 +4764,283 @@ func (m *LensDashboardModel) renderMiniProgressBar(progress float64, width int) 
 
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 	return t.Renderer.NewStyle().Foreground(barColor).Render("[" + bar + "]")
+}
+
+// renderGroupedView renders the grouped view with workstream-like styling
+func (m *LensDashboardModel) renderGroupedView(contentWidth, visibleLines int, statsStyle lipgloss.Style) []string {
+	t := m.theme
+	var allLines []string
+
+	// Same styles as workstream view for consistency
+	groupHeaderStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+	groupHeaderSelectedStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true).Background(t.Highlight)
+	subStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
+	issueStyle := t.Renderer.NewStyle()
+	issueSelectedStyle := t.Renderer.NewStyle().Bold(true)
+	readyStyle := t.Renderer.NewStyle().Foreground(t.Open)
+	blockedStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
+	closedStyle := t.Renderer.NewStyle().Foreground(t.Closed)
+	inProgStyle := t.Renderer.NewStyle().Foreground(t.InProgress)
+
+	// Build all lines first, then apply scroll
+	for gIdx, group := range m.groupedSections {
+		// Check if this group header is selected (on group header, not in sub-group)
+		isHeaderSelected := gIdx == m.groupedCursor && m.groupedSubCursor < 0 && m.groupedIssueCursor < 0
+		isExpanded := m.groupedExpanded[gIdx]
+
+		// Group header with progress
+		progressPct := int(group.Progress * 100)
+		progressBar := m.renderMiniProgressBar(group.Progress, 8)
+
+		// Status counts
+		statusCounts := fmt.Sprintf("○%d ●%d ◈%d ✓%d",
+			group.ReadyCount, group.InProgressCount, group.BlockedCount, group.ClosedCount)
+
+		// Expand/collapse indicator
+		expandIcon := "▶"
+		if isExpanded {
+			expandIcon = "▼"
+		}
+
+		// Selection indicator
+		selectPrefix := "  "
+		headerStyle := groupHeaderStyle
+		if isHeaderSelected {
+			selectPrefix = "▸ "
+			headerStyle = groupHeaderSelectedStyle
+		}
+
+		// Sub-group indicator
+		subGroupIndicator := ""
+		if len(group.SubWorkstreams) > 0 {
+			subGroupIndicator = fmt.Sprintf(" [%d sub]", len(group.SubWorkstreams))
+		}
+
+		groupLine := fmt.Sprintf("%s%s %s %s %d%% %s (%d)%s",
+			selectPrefix,
+			expandIcon,
+			headerStyle.Render(group.Name),
+			progressBar,
+			progressPct,
+			subStyle.Render(statusCounts),
+			len(group.Issues),
+			subStyle.Render(subGroupIndicator))
+		allLines = append(allLines, groupLine)
+
+		// Render sub-groups if expanded and present
+		if isExpanded && len(group.SubWorkstreams) > 0 {
+			for subIdx, subGroup := range group.SubWorkstreams {
+				if subGroup == nil {
+					continue
+				}
+				subProgress := int(subGroup.Progress * 100)
+				subStatusCounts := fmt.Sprintf("○%d ●%d ◈%d ✓%d",
+					subGroup.ReadyCount, subGroup.InProgressCount, subGroup.BlockedCount, subGroup.ClosedCount)
+
+				// Check sub-group expansion
+				subExpanded := m.groupedSubExpanded[gIdx] != nil && m.groupedSubExpanded[gIdx][subIdx]
+				subExpandIcon := "▶"
+				if subExpanded {
+					subExpandIcon = "▼"
+				}
+
+				// Check if this sub-group header is selected
+				isSubHeaderSelected := gIdx == m.groupedCursor && subIdx == m.groupedSubCursor && m.groupedIssueCursor < 0
+				subSelectPrefix := "     "
+				subHeaderStyle := subStyle
+				if isSubHeaderSelected {
+					subSelectPrefix = "   ▸ "
+					subHeaderStyle = groupHeaderSelectedStyle
+				}
+
+				subLine := fmt.Sprintf("%s%s %s (%d%%) %s (%d)",
+					subSelectPrefix,
+					subExpandIcon,
+					subHeaderStyle.Render(subGroup.Name),
+					subProgress,
+					subStyle.Render(subStatusCounts),
+					len(subGroup.Issues))
+				allLines = append(allLines, subLine)
+
+				// Render sub-group issues if expanded
+				if subExpanded {
+					if m.groupedTreeView {
+						// Tree view for sub-group issues
+						subGroupCopy := *subGroup
+						treeRoots := m.buildWorkstreamTree(&subGroupCopy)
+						flatNodes := m.flattenWSTree(treeRoots)
+						for i, fn := range flatNodes {
+							isIssueSelected := gIdx == m.groupedCursor && subIdx == m.groupedSubCursor && i == m.groupedIssueCursor
+							allLines = append(allLines, m.renderGroupedTreeIssue(fn, isIssueSelected, contentWidth, "        ", issueStyle, issueSelectedStyle, readyStyle, blockedStyle, closedStyle, inProgStyle, subStyle))
+						}
+					} else {
+						for i, issue := range subGroup.Issues {
+							isIssueSelected := gIdx == m.groupedCursor && subIdx == m.groupedSubCursor && i == m.groupedIssueCursor
+							allLines = append(allLines, m.renderGroupedIssue(issue, isIssueSelected, contentWidth, "        ", issueStyle, issueSelectedStyle, readyStyle, blockedStyle, closedStyle, inProgStyle, subStyle))
+						}
+					}
+				}
+			}
+		}
+
+		// Render issues when expanded (only if no sub-groups, otherwise they're shown in sub-groups)
+		if isExpanded && len(group.SubWorkstreams) == 0 {
+			if m.groupedTreeView {
+				// Tree view for group issues
+				groupCopy := group
+				treeRoots := m.buildWorkstreamTree(&groupCopy)
+				flatNodes := m.flattenWSTree(treeRoots)
+				for i, fn := range flatNodes {
+					isIssueSelected := gIdx == m.groupedCursor && m.groupedSubCursor < 0 && i == m.groupedIssueCursor
+					allLines = append(allLines, m.renderGroupedTreeIssue(fn, isIssueSelected, contentWidth, "    ", issueStyle, issueSelectedStyle, readyStyle, blockedStyle, closedStyle, inProgStyle, subStyle))
+				}
+			} else {
+				maxIssues := len(group.Issues)
+				for i := 0; i < maxIssues && i < len(group.Issues); i++ {
+					issue := group.Issues[i]
+					isIssueSelected := gIdx == m.groupedCursor && m.groupedSubCursor < 0 && i == m.groupedIssueCursor
+					allLines = append(allLines, m.renderGroupedIssue(issue, isIssueSelected, contentWidth, "    ", issueStyle, issueSelectedStyle, readyStyle, blockedStyle, closedStyle, inProgStyle, subStyle))
+				}
+			}
+		}
+
+		allLines = append(allLines, "") // Empty line between groups
+	}
+
+	// Apply scroll offset
+	var lines []string
+	viewModeStr := "list"
+	if m.groupedTreeView {
+		viewModeStr = fmt.Sprintf("tree [depth:%s]", m.dependencyDepth.String())
+	}
+	lines = append(lines, subStyle.Render(fmt.Sprintf("  Grouped by %s (%d groups, %s):", m.groupByMode.String(), len(m.groupedSections), viewModeStr)))
+	lines = append(lines, "")
+
+	// Calculate visible window (2 lines for header above, rest for content)
+	totalLines := len(allLines)
+	contentLines := visibleLines - 2
+
+	startIdx := m.groupedScroll
+	if startIdx < 0 {
+		startIdx = 0
+	}
+
+	// Add visible content lines
+	if startIdx < totalLines {
+		endIdx := startIdx + contentLines
+		if endIdx > totalLines {
+			endIdx = totalLines
+		}
+		for i := startIdx; i < endIdx; i++ {
+			lines = append(lines, allLines[i])
+		}
+	}
+
+	// Pad with empty lines to allow empty space after list end
+	// This ensures the last items can be centered with empty space below
+	for len(lines) < visibleLines {
+		lines = append(lines, "")
+	}
+
+	return lines
+}
+
+// renderGroupedIssue renders a single issue in grouped view
+func (m *LensDashboardModel) renderGroupedIssue(issue model.Issue, isSelected bool, contentWidth int, indent string, issueStyle, issueSelectedStyle, readyStyle, blockedStyle, closedStyle, inProgStyle, subStyle lipgloss.Style) string {
+	t := m.theme
+
+	// Determine status icon and style
+	var statusIcon string
+	var style lipgloss.Style
+	switch issue.Status {
+	case model.StatusClosed:
+		statusIcon = "✓"
+		style = closedStyle
+	case model.StatusBlocked:
+		statusIcon = "◈"
+		style = blockedStyle
+	case model.StatusInProgress:
+		statusIcon = "●"
+		style = inProgStyle
+	default:
+		// Check if blocked by dependencies
+		if m.isIssueBlockedByDeps(issue.ID) {
+			statusIcon = "◈"
+			style = blockedStyle
+		} else {
+			statusIcon = "○"
+			style = readyStyle
+		}
+	}
+
+	// Selection indicator
+	issuePrefix := indent
+	idStyle := issueStyle
+	titleStyle := issueStyle
+	if isSelected {
+		issuePrefix = indent[:len(indent)-2] + "▸ "
+		idStyle = issueSelectedStyle.Foreground(t.Primary)
+		titleStyle = issueSelectedStyle
+	}
+
+	title := truncateRunesHelper(issue.Title, contentWidth-20-len(indent), "…")
+	return fmt.Sprintf("%s%s %s %s",
+		issuePrefix,
+		style.Render(statusIcon),
+		idStyle.Render(issue.ID),
+		titleStyle.Render(title))
+}
+
+// renderGroupedTreeIssue renders a single issue with tree prefix in grouped view
+func (m *LensDashboardModel) renderGroupedTreeIssue(fn LensFlatNode, isSelected bool, contentWidth int, indent string, issueStyle, issueSelectedStyle, readyStyle, blockedStyle, closedStyle, inProgStyle, subStyle lipgloss.Style) string {
+	t := m.theme
+	issue := fn.Node.Issue
+
+	// Determine status icon and style
+	var statusIcon string
+	var style lipgloss.Style
+	switch issue.Status {
+	case model.StatusClosed:
+		statusIcon = "✓"
+		style = closedStyle
+	case model.StatusBlocked:
+		statusIcon = "◈"
+		style = blockedStyle
+	case model.StatusInProgress:
+		statusIcon = "●"
+		style = inProgStyle
+	default:
+		// Check if blocked by dependencies
+		if m.isIssueBlockedByDeps(issue.ID) {
+			statusIcon = "◈"
+			style = blockedStyle
+		} else {
+			statusIcon = "○"
+			style = readyStyle
+		}
+	}
+
+	// Build tree prefix
+	treePrefix := fn.TreePrefix
+
+	// Selection indicator
+	issuePrefix := indent + treePrefix
+	idStyle := issueStyle
+	titleStyle := issueStyle
+	if isSelected {
+		// For tree view, highlight the whole line
+		idStyle = issueSelectedStyle.Foreground(t.Primary)
+		titleStyle = issueSelectedStyle
+		// Add selection marker at the beginning
+		issuePrefix = indent[:len(indent)-2] + "▸ " + treePrefix
+	}
+
+	title := truncateRunesHelper(issue.Title, contentWidth-20-len(indent)-len(treePrefix), "…")
+	return fmt.Sprintf("%s%s %s %s",
+		issuePrefix,
+		style.Render(statusIcon),
+		idStyle.Render(issue.ID),
+		titleStyle.Render(title))
 }
 
 // renderStatusHeader renders a status section header with elegant dotted dividers
@@ -3493,9 +5141,9 @@ func (m *LensDashboardModel) renderTreeNode(fn LensFlatNode, isSelected bool, ma
 		epicBadge = t.Renderer.NewStyle().Foreground(t.Subtext).Render(" [EPIC]")
 	}
 
-	// Status indicator for blocked items
+	// Status indicator for blocked items (only show if blocker not already visible in tree)
 	statusSuffix := ""
-	if fn.Status == "blocked" && fn.BlockedBy != "" {
+	if fn.Status == "blocked" && fn.BlockedBy != "" && !fn.BlockerInTree {
 		blockerStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
 		statusSuffix = blockerStyle.Render(" ◄ " + fn.BlockedBy)
 	}
@@ -3648,4 +5296,360 @@ func (m *LensDashboardModel) dumpFlatByDepth() string {
 	}
 
 	return buf.String()
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SPLIT VIEW - Bead detail panel on the right
+// ══════════════════════════════════════════════════════════════════════════════
+
+const LensSplitViewThreshold = 120 // Minimum width for split view
+
+// initDetailViewport initializes the detail viewport for split view
+func (m *LensDashboardModel) initDetailViewport() {
+	m.detailViewport = viewport.New(40, 20)
+	m.detailViewport.Style = lipgloss.NewStyle()
+	m.updateDetailContent()
+}
+
+// IsSplitView returns true if split view is active
+func (m *LensDashboardModel) IsSplitView() bool {
+	return m.splitViewMode
+}
+
+// IsDetailFocused returns true if the detail panel has focus
+func (m *LensDashboardModel) IsDetailFocused() bool {
+	return m.detailFocus
+}
+
+// ToggleDetailFocus switches focus between tree and detail panels
+func (m *LensDashboardModel) ToggleDetailFocus() {
+	if m.splitViewMode {
+		m.detailFocus = !m.detailFocus
+	}
+}
+
+// SetDetailFocus sets the detail panel focus state
+func (m *LensDashboardModel) SetDetailFocus(focused bool) {
+	m.detailFocus = focused
+}
+
+// ScrollDetailUp scrolls the detail viewport up
+func (m *LensDashboardModel) ScrollDetailUp() {
+	if m.detailFocus {
+		m.detailViewport.LineUp(1)
+	}
+}
+
+// ScrollDetailDown scrolls the detail viewport down
+func (m *LensDashboardModel) ScrollDetailDown() {
+	if m.detailFocus {
+		m.detailViewport.LineDown(1)
+	}
+}
+
+// ScrollDetailPageUp scrolls the detail viewport up by a page
+func (m *LensDashboardModel) ScrollDetailPageUp() {
+	if m.detailFocus {
+		m.detailViewport.HalfViewUp()
+	}
+}
+
+// ScrollDetailPageDown scrolls the detail viewport down by a page
+func (m *LensDashboardModel) ScrollDetailPageDown() {
+	if m.detailFocus {
+		m.detailViewport.HalfViewDown()
+	}
+}
+
+// updateDetailContent updates the detail viewport content based on selected issue
+func (m *LensDashboardModel) updateDetailContent() {
+	if m.selectedIssueID == "" {
+		m.detailViewport.SetContent("No issue selected")
+		return
+	}
+
+	issue, exists := m.issueMap[m.selectedIssueID]
+	if !exists {
+		m.detailViewport.SetContent("Issue not found: " + m.selectedIssueID)
+		return
+	}
+
+	content := m.renderIssueDetail(issue)
+	m.detailViewport.SetContent(content)
+	m.detailViewport.GotoTop()
+}
+
+// renderIssueDetail renders the detailed view of an issue for the viewport
+func (m *LensDashboardModel) renderIssueDetail(issue *model.Issue) string {
+	t := m.theme
+	var sb strings.Builder
+
+	// Title with type icon
+	titleStyle := t.Renderer.NewStyle().Bold(true).Foreground(t.Primary)
+	typeIcon, typeColor := t.GetTypeIcon(string(issue.IssueType))
+	typeStyle := t.Renderer.NewStyle().Foreground(typeColor)
+
+	sb.WriteString(typeStyle.Render(typeIcon) + " ")
+	sb.WriteString(titleStyle.Render(issue.Title))
+	sb.WriteString("\n\n")
+
+	// ID and metadata
+	labelStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
+	valueStyle := t.Renderer.NewStyle().Foreground(t.Base.GetForeground())
+
+	sb.WriteString(labelStyle.Render("ID:       "))
+	sb.WriteString(valueStyle.Render(issue.ID))
+	sb.WriteString("\n")
+
+	sb.WriteString(labelStyle.Render("Status:   "))
+	sb.WriteString(RenderStatusBadge(string(issue.Status)))
+	sb.WriteString("\n")
+
+	sb.WriteString(labelStyle.Render("Priority: "))
+	sb.WriteString(RenderPriorityBadge(issue.Priority))
+	sb.WriteString("\n")
+
+	sb.WriteString(labelStyle.Render("Type:     "))
+	sb.WriteString(typeStyle.Render(string(issue.IssueType)))
+	sb.WriteString("\n")
+
+	if issue.Assignee != "" {
+		sb.WriteString(labelStyle.Render("Assignee: "))
+		sb.WriteString(valueStyle.Render("@"+issue.Assignee))
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(labelStyle.Render("Created:  "))
+	sb.WriteString(valueStyle.Render(issue.CreatedAt.Format("2006-01-02 15:04")))
+	sb.WriteString("\n")
+
+	if !issue.UpdatedAt.IsZero() && issue.UpdatedAt != issue.CreatedAt {
+		sb.WriteString(labelStyle.Render("Updated:  "))
+		sb.WriteString(valueStyle.Render(issue.UpdatedAt.Format("2006-01-02 15:04")))
+		sb.WriteString("\n")
+	}
+
+	// Labels
+	if len(issue.Labels) > 0 {
+		sb.WriteString("\n")
+		sectionStyle := t.Renderer.NewStyle().Bold(true).Foreground(t.Secondary)
+		sb.WriteString(sectionStyle.Render("🏷 Labels"))
+		sb.WriteString("\n")
+
+		chipStyle := t.Renderer.NewStyle().Foreground(t.Primary)
+		for _, label := range issue.Labels {
+			sb.WriteString("  ")
+			sb.WriteString(chipStyle.Render(label))
+			sb.WriteString("\n")
+		}
+	}
+
+	// Dependencies
+	blockers := m.upstream[issue.ID]
+	dependents := m.downstream[issue.ID]
+
+	if len(blockers) > 0 || len(dependents) > 0 {
+		sb.WriteString("\n")
+		sectionStyle := t.Renderer.NewStyle().Bold(true).Foreground(t.Secondary)
+		sb.WriteString(sectionStyle.Render("🔗 Dependencies"))
+		sb.WriteString("\n")
+
+		if len(blockers) > 0 {
+			blockerStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
+			sb.WriteString(blockerStyle.Render(fmt.Sprintf("  ↓ Blocked by (%d):", len(blockers))))
+			sb.WriteString("\n")
+			for _, blockerID := range blockers {
+				if blocker, ok := m.issueMap[blockerID]; ok {
+					title := blocker.Title
+					if len(title) > 30 {
+						title = title[:27] + "..."
+					}
+					sb.WriteString(fmt.Sprintf("    %s %s\n", blockerID, labelStyle.Render(title)))
+				}
+			}
+		}
+
+		if len(dependents) > 0 {
+			dependentStyle := t.Renderer.NewStyle().Foreground(t.Open)
+			sb.WriteString(dependentStyle.Render(fmt.Sprintf("  ↑ Blocks (%d):", len(dependents))))
+			sb.WriteString("\n")
+			for _, depID := range dependents {
+				if dep, ok := m.issueMap[depID]; ok {
+					title := dep.Title
+					if len(title) > 30 {
+						title = title[:27] + "..."
+					}
+					sb.WriteString(fmt.Sprintf("    %s %s\n", depID, labelStyle.Render(title)))
+				}
+			}
+		}
+	}
+
+	// Description
+	if issue.Description != "" {
+		sb.WriteString("\n")
+		sectionStyle := t.Renderer.NewStyle().Bold(true).Foreground(t.Secondary)
+		sb.WriteString(sectionStyle.Render("📝 Description"))
+		sb.WriteString("\n\n")
+		sb.WriteString(issue.Description)
+		sb.WriteString("\n")
+	}
+
+	// Design
+	if issue.Design != "" {
+		sb.WriteString("\n")
+		sectionStyle := t.Renderer.NewStyle().Bold(true).Foreground(t.Secondary)
+		sb.WriteString(sectionStyle.Render("🎨 Design"))
+		sb.WriteString("\n\n")
+		sb.WriteString(issue.Design)
+		sb.WriteString("\n")
+	}
+
+	// Acceptance Criteria
+	if issue.AcceptanceCriteria != "" {
+		sb.WriteString("\n")
+		sectionStyle := t.Renderer.NewStyle().Bold(true).Foreground(t.Secondary)
+		sb.WriteString(sectionStyle.Render("✅ Acceptance Criteria"))
+		sb.WriteString("\n\n")
+		sb.WriteString(issue.AcceptanceCriteria)
+		sb.WriteString("\n")
+	}
+
+	// Notes
+	if issue.Notes != "" {
+		sb.WriteString("\n")
+		sectionStyle := t.Renderer.NewStyle().Bold(true).Foreground(t.Secondary)
+		sb.WriteString(sectionStyle.Render("📋 Notes"))
+		sb.WriteString("\n\n")
+		sb.WriteString(issue.Notes)
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+// renderSplitView renders the split layout with tree on left and detail on right
+func (m *LensDashboardModel) renderSplitView() string {
+	t := m.theme
+
+	// Calculate panel widths (45% tree, 55% detail)
+	leftWidth := (m.width * 45) / 100
+	rightWidth := m.width - leftWidth - 1 // 1 for separator
+
+	if leftWidth < 40 {
+		leftWidth = 40
+	}
+	if rightWidth < 30 {
+		rightWidth = 30
+	}
+
+	// Panel styles based on focus
+	var leftStyle, rightStyle lipgloss.Style
+	borderColor := t.Border
+	focusBorderColor := t.Primary
+
+	// Use full height given to us - the parent wraps everything with Height/MaxHeight
+	panelHeight := m.height
+	if m.detailFocus {
+		leftStyle = t.Renderer.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor).
+			Width(leftWidth - 2).
+			Height(panelHeight).
+			MaxHeight(panelHeight)
+		rightStyle = t.Renderer.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(focusBorderColor).
+			Width(rightWidth - 2).
+			Height(panelHeight).
+			MaxHeight(panelHeight)
+	} else {
+		leftStyle = t.Renderer.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(focusBorderColor).
+			Width(leftWidth - 2).
+			Height(panelHeight).
+			MaxHeight(panelHeight)
+		rightStyle = t.Renderer.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor).
+			Width(rightWidth - 2).
+			Height(panelHeight).
+			MaxHeight(panelHeight)
+	}
+
+	// Render left panel (tree content)
+	leftContent := m.renderTreeContent(leftWidth - 4)
+
+	// Render right panel (detail viewport)
+	// Viewport height = panelHeight - 1 (for header line)
+	m.detailViewport.Width = rightWidth - 4
+	m.detailViewport.Height = panelHeight - 1
+	rightContent := m.detailViewport.View()
+
+	// Add panel headers
+	leftHeader := t.Renderer.NewStyle().Bold(true).Foreground(t.Primary).Render("◆ " + m.labelName)
+	rightHeader := t.Renderer.NewStyle().Bold(true).Foreground(t.Secondary).Render("📋 Details")
+
+	if m.detailFocus {
+		rightHeader = t.Renderer.NewStyle().Bold(true).Foreground(t.Primary).Render("📋 Details")
+	}
+
+	leftPanel := lipgloss.JoinVertical(lipgloss.Left, leftHeader, leftContent)
+	rightPanel := lipgloss.JoinVertical(lipgloss.Left, rightHeader, rightContent)
+
+	// Apply styles
+	leftView := leftStyle.Render(leftPanel)
+	rightView := rightStyle.Render(rightPanel)
+
+	// Join horizontally
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftView, rightView)
+}
+
+// renderTreeContent renders just the tree portion for split view
+func (m *LensDashboardModel) renderTreeContent(contentWidth int) string {
+	t := m.theme
+	var lines []string
+
+	statsStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
+
+	// Stats line
+	primaryIcon := t.Renderer.NewStyle().Foreground(t.Primary).Render("●")
+	contextIcon := t.Renderer.NewStyle().Foreground(t.Secondary).Render("○")
+	depthStyle := t.Renderer.NewStyle().Foreground(t.InProgress).Bold(true)
+
+	statsLine := fmt.Sprintf("%s %d  %s %d  [%s]",
+		primaryIcon, m.primaryCount, contextIcon, m.contextCount,
+		depthStyle.Render(m.dependencyDepth.String()))
+	lines = append(lines, statsStyle.Render(statsLine))
+
+	// Status summary
+	readyStyle := t.Renderer.NewStyle().Foreground(t.Open)
+	blockedStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
+	summaryLine := fmt.Sprintf("%s ready  %s blocked",
+		readyStyle.Render(fmt.Sprintf("%d", m.readyCount)),
+		blockedStyle.Render(fmt.Sprintf("%d", m.blockedCount)))
+	lines = append(lines, statsStyle.Render(summaryLine))
+	lines = append(lines, "")
+
+	// Calculate visible area
+	visibleLines := m.height - 10
+	if visibleLines < 5 {
+		visibleLines = 5
+	}
+
+	// Render based on view type
+	if m.viewType == ViewTypeGrouped && len(m.groupedSections) > 0 {
+		lines = append(lines, m.renderGroupedView(contentWidth, visibleLines, statsStyle)...)
+	} else if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
+		lines = append(lines, m.renderWorkstreamView(contentWidth, visibleLines, statsStyle)...)
+	} else if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+		lines = append(lines, m.renderCenteredView(contentWidth, visibleLines, statsStyle)...)
+	} else {
+		// Render flat tree view (reuse the main render function)
+		flatLines := m.renderFlatView(contentWidth, visibleLines, statsStyle)
+		lines = append(lines, flatLines...)
+	}
+
+	return strings.Join(lines, "\n")
 }

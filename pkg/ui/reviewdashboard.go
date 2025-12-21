@@ -297,7 +297,7 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 				}
 				return m, nil
 			default:
-				if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] < 127 {
+				if IsPrintableKey(msg.String()) {
 					m.searchQuery += msg.String()
 					m.filterBySearch()
 				}
@@ -343,7 +343,7 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 				}
 				return m, nil
 			default:
-				if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] < 127 {
+				if IsPrintableKey(msg.String()) {
 					m.labelInput += msg.String()
 				}
 				return m, nil
@@ -376,7 +376,7 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 				return m, nil
 			default:
 				// Add typed character (only printable)
-				if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] < 127 {
+				if IsPrintableKey(msg.String()) {
 					m.assigneeInput += msg.String()
 				}
 				return m, nil
@@ -673,7 +673,7 @@ func (m *ReviewDashboardModel) View() string {
 
 	// Get base view first
 	var base string
-	if m.width >= 100 {
+	if m.width >= BreakpointMedium {
 		base = m.renderSplitView()
 	} else {
 		base = m.renderBaseView()
@@ -1065,7 +1065,7 @@ func (m *ReviewDashboardModel) renderDetailPanel() string {
 
 // renderSplitView renders a split-panel layout with tree on left and detail on right
 func (m *ReviewDashboardModel) renderSplitView() string {
-	if m.width < 80 {
+	if m.width < BreakpointNarrow {
 		return m.renderBaseView()
 	}
 
@@ -1217,81 +1217,6 @@ func (m *ReviewDashboardModel) renderSplitView() string {
 	output.WriteString(keyStyle.Render("q") + hintStyle.Render("uit"))
 
 	return output.String()
-}
-
-// renderSplitViewOld is the old implementation for reference
-func (m *ReviewDashboardModel) renderSplitViewOld() string {
-	// Calculate panel widths
-	leftWidth := (m.width - 3) / 2  // -3 for divider and padding
-	rightWidth := m.width - leftWidth - 3
-	contentHeight := m.height - 6 // Header, progress, separator, footer
-
-	if contentHeight < 5 {
-		contentHeight = 5
-	}
-
-	// Header
-	var header strings.Builder
-	headerStyle := m.theme.Renderer.NewStyle().Bold(true).Foreground(m.theme.Primary)
-	header.WriteString(headerStyle.Render("Review: "+m.tree.Root.Title) + "\n")
-
-	// Progress indicator
-	total := len(m.flatNodes)
-	reviewed := 0
-	for _, node := range m.flatNodes {
-		if node.Issue.ReviewStatus != "" && node.Issue.ReviewStatus != model.ReviewStatusUnreviewed {
-			reviewed++
-		}
-	}
-	progressStyle := m.theme.Renderer.NewStyle().Foreground(m.theme.Subtext)
-	header.WriteString(progressStyle.Render(fmt.Sprintf("[%d/%d reviewed]", reviewed, total)) + "\n")
-	header.WriteString(strings.Repeat("─", m.width))
-
-	// Left panel: tree list
-	leftPanel := m.renderTreePanelFixed(leftWidth, contentHeight)
-
-	// Right panel: detail view
-	rightPanel := m.renderDetailPanelFixed(rightWidth, contentHeight)
-
-	// Style the panels
-	leftStyle := m.theme.Renderer.NewStyle().
-		Width(leftWidth).
-		Height(contentHeight)
-
-	rightStyle := m.theme.Renderer.NewStyle().
-		Width(rightWidth).
-		Height(contentHeight)
-
-	// Divider
-	dividerColor := m.theme.Border
-	if m.detailFocus {
-		dividerColor = m.theme.Primary
-	}
-	divider := m.theme.Renderer.NewStyle().
-		Foreground(dividerColor).
-		Render(strings.Repeat("│\n", contentHeight))
-
-	// Join panels horizontally
-	content := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		leftStyle.Render(leftPanel),
-		divider,
-		rightStyle.Render(rightPanel),
-	)
-
-	// Footer
-	var footer strings.Builder
-	footer.WriteString(strings.Repeat("─", m.width) + "\n")
-	filterStyle := m.theme.Renderer.NewStyle().Foreground(m.theme.Subtext)
-	footer.WriteString(filterStyle.Render(fmt.Sprintf("Filter: [%s]", m.showFilter)) + "  ")
-	hintStyle := m.theme.Renderer.NewStyle().Faint(true)
-	focusHint := "tree"
-	if m.detailFocus {
-		focusHint = "detail"
-	}
-	footer.WriteString(hintStyle.Render(fmt.Sprintf("[Tab:%s] [j/k] []/[] [n] [a] [r] [d] [A] [q]", focusHint)))
-
-	return header.String() + "\n" + content + "\n" + footer.String()
 }
 
 // renderTreePanelFixed renders tree panel with fixed dimensions
@@ -1615,53 +1540,6 @@ func stripAnsi(s string) string {
 	return string(result)
 }
 
-// renderWithOverlay renders the base view with a modal overlay centered on top
-func (m *ReviewDashboardModel) renderWithOverlay(overlay string) string {
-	// Get the base view first
-	base := m.renderBaseView()
-	baseLines := strings.Split(base, "\n")
-
-	// Get overlay dimensions
-	overlayLines := strings.Split(overlay, "\n")
-	overlayHeight := len(overlayLines)
-	overlayWidth := 0
-	for _, line := range overlayLines {
-		if len(stripAnsi(line)) > overlayWidth {
-			overlayWidth = len(stripAnsi(line))
-		}
-	}
-
-	// Calculate center position
-	startRow := (m.height - overlayHeight) / 2
-	startCol := (m.width - overlayWidth) / 2
-	if startRow < 0 {
-		startRow = 0
-	}
-	if startCol < 0 {
-		startCol = 0
-	}
-
-	// Overlay the modal onto the base
-	for i, overlayLine := range overlayLines {
-		baseRowIdx := startRow + i
-		if baseRowIdx < len(baseLines) {
-			baseLine := baseLines[baseRowIdx]
-			// Simple overlay: replace the center portion
-			if startCol > 0 && startCol < len(baseLine) {
-				prefix := ""
-				if startCol <= len(baseLine) {
-					prefix = baseLine[:startCol]
-				}
-				baseLines[baseRowIdx] = prefix + overlayLine
-			} else {
-				baseLines[baseRowIdx] = strings.Repeat(" ", startCol) + overlayLine
-			}
-		}
-	}
-
-	return strings.Join(baseLines, "\n")
-}
-
 // renderBaseView renders the main dashboard view without overlay handling
 func (m *ReviewDashboardModel) renderBaseView() string {
 	var b strings.Builder
@@ -1822,6 +1700,11 @@ func (m *ReviewDashboardModel) PendingSaveCount() int {
 // WorkspaceRoot returns the workspace root path
 func (m *ReviewDashboardModel) WorkspaceRoot() string {
 	return m.workspaceRoot
+}
+
+// HasActiveModal returns true if any modal/dialog is currently shown
+func (m *ReviewDashboardModel) HasActiveModal() bool {
+	return m.showHelp || m.showAssigneeInput || m.showLabelInput
 }
 
 // generateSimplePrompt creates a simple summary of reviewed beads and their status

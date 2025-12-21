@@ -33,8 +33,6 @@ type LensSelectorModel struct {
 	allEpics      []LensItem    // All epic items
 	allBeads      []LensItem    // All bead/issue items
 	filteredItems []LensItem    // Filtered by search and mode
-	pinnedItems   []LensItem    // Pinned lenses (persisted)
-	recentItems   []LensItem    // Recently selected lenses
 	issues        []model.Issue // Reference to issues for scope filtering
 
 	// Stats panel data
@@ -66,6 +64,7 @@ type LensSelectorModel struct {
 
 	// Selection result
 	confirmed    bool
+	cancelled    bool      // True when user explicitly cancelled (esc/q)
 	selectedItem *LensItem
 	scopedLabels []string // When scope is set and item selected, both labels returned
 }
@@ -90,11 +89,15 @@ func NewLensSelectorModel(issues []model.Issue, theme Theme, graphStats *analysi
 	var epics []LensItem
 	var beads []LensItem
 
+	// Pre-build maps once for efficient epic child counting (O(n) instead of O(e*n))
+	childrenMap := BuildChildrenMap(issues)
+	statusMap := BuildStatusMap(issues)
+
 	for _, issue := range issues {
 		// Collect epics
 		if issue.IssueType == model.TypeEpic && issue.Status != model.StatusClosed {
-			// Count children for epic progress
-			childTotal, childClosed := countEpicChildren(issue.ID, issues)
+			// Count children for epic progress using pre-built maps
+			childTotal, childClosed := countEpicChildrenWithMaps(issue.ID, childrenMap, statusMap)
 			progress := 0.0
 			if childTotal > 0 {
 				progress = float64(childClosed) / float64(childTotal)
@@ -193,10 +196,10 @@ func NewLensSelectorModel(issues []model.Issue, theme Theme, graphStats *analysi
 	}
 }
 
-// countEpicChildren counts total and closed descendants for an epic (recursive)
-func countEpicChildren(epicID string, issues []model.Issue) (total, closed int) {
-	children, issueStatus := buildChildrenMap(issues)
-
+// countEpicChildrenWithMaps counts total and closed descendants for an epic using pre-built maps.
+// This is O(d) where d = number of descendants, much better than the old O(n) approach
+// when called for multiple epics.
+func countEpicChildrenWithMaps(epicID string, children map[string][]string, issueStatus map[string]model.Status) (total, closed int) {
 	// BFS to count all descendants
 	visited := make(map[string]bool)
 	queue := []string{epicID}
@@ -214,21 +217,6 @@ func countEpicChildren(epicID string, issues []model.Issue) (total, closed int) 
 					closed++
 				}
 				queue = append(queue, childID)
-			}
-		}
-	}
-	return
-}
-
-// buildChildrenMap builds parent -> children map and issue status map for efficient traversal
-func buildChildrenMap(issues []model.Issue) (children map[string][]string, issueStatus map[string]model.Status) {
-	children = make(map[string][]string)
-	issueStatus = make(map[string]model.Status)
-	for _, issue := range issues {
-		issueStatus[issue.ID] = issue.Status
-		for _, dep := range issue.Dependencies {
-			if dep.Type == model.DepParentChild {
-				children[dep.DependsOnID] = append(children[dep.DependsOnID], issue.ID)
 			}
 		}
 	}
@@ -383,12 +371,13 @@ func (m *LensSelectorModel) updateNormalMode(key string) bool {
 			m.confirmed = true
 		}
 		return true
-	case "esc":
-		// If in scope mode, clear scope first
-		if m.scopeMode {
+	case "esc", "q":
+		// If in scope mode, clear scope first (esc only)
+		if key == "esc" && m.scopeMode {
 			m.clearScope()
 			return true
 		}
+		m.cancelled = true
 		m.confirmed = false
 		m.selectedItem = nil
 		return true
@@ -425,9 +414,8 @@ func (m *LensSelectorModel) cycleSearchMode() {
 	default:
 		m.searchMode = "merged"
 	}
-	// Clear search and rebuild filtered items for new mode
-	m.searchInput.SetValue("")
-	m.rebuildFilteredItems()
+	// Preserve search text and re-filter with new mode
+	m.filterItems()
 	m.selectedIndex = 0
 }
 
@@ -518,7 +506,7 @@ func (m *LensSelectorModel) IsConfirmed() bool {
 
 // IsCancelled returns true if user cancelled the selector
 func (m *LensSelectorModel) IsCancelled() bool {
-	return m.selectedItem == nil && !m.confirmed
+	return m.cancelled
 }
 
 // SelectedItem returns the selected lens item, or nil if none
@@ -690,12 +678,6 @@ func (m *LensSelectorModel) Reset() {
 // STATS PANEL HELPERS - Data access for rich item statistics
 // ══════════════════════════════════════════════════════════════════════════════
 
-// LabelCount represents a label with its issue count for related labels display
-type LabelCount struct {
-	Label string
-	Count int
-}
-
 // getBlockers returns IDs of issues that block the given issue
 func (m *LensSelectorModel) getBlockers(issueID string) []string {
 	issue := m.issueMap[issueID]
@@ -796,7 +778,7 @@ func (m *LensSelectorModel) countTypes(issues []model.Issue) map[model.IssueType
 
 // getEpicChildrenIssues returns all descendant issues for an epic
 func (m *LensSelectorModel) getEpicChildrenIssues(epicID string) []model.Issue {
-	children, _ := buildChildrenMap(m.issues)
+	children := BuildChildrenMap(m.issues)
 
 	// BFS to collect all descendants
 	visited := make(map[string]bool)
@@ -886,12 +868,12 @@ func (m *LensSelectorModel) View() string {
 	t := m.theme
 
 	// Check for very narrow terminal - use minimal layout (list only)
-	if m.width < 80 {
+	if m.width < BreakpointNarrow {
 		return m.renderMinimalLayout()
 	}
 
 	// Check for narrow terminal - use stacked layout
-	if m.width < 100 {
+	if m.width < BreakpointMedium {
 		return m.renderStackedLayout()
 	}
 
@@ -1469,8 +1451,8 @@ func (m *LensSelectorModel) renderEpicStats(item LensItem, width, height int) st
 		Foreground(t.Epic).
 		Bold(true)
 	boxWidth := width - 4
-	if boxWidth < 20 {
-		boxWidth = 20
+	if boxWidth < MinBoxWidth {
+		boxWidth = MinBoxWidth
 	}
 	topBorder := "╔" + strings.Repeat("═", boxWidth-2) + "╗"
 	bottomBorder := "╚" + strings.Repeat("═", boxWidth-2) + "╝"
@@ -1591,8 +1573,8 @@ func (m *LensSelectorModel) renderLabelStats(item LensItem, width, height int) s
 		Foreground(t.Secondary).
 		Bold(true)
 	boxWidth := width - 4
-	if boxWidth < 20 {
-		boxWidth = 20
+	if boxWidth < MinBoxWidth {
+		boxWidth = MinBoxWidth
 	}
 	topBorder := "╔" + strings.Repeat("═", boxWidth-2) + "╗"
 	bottomBorder := "╚" + strings.Repeat("═", boxWidth-2) + "╝"
@@ -1720,8 +1702,8 @@ func (m *LensSelectorModel) renderBeadStats(item LensItem, width, height int) st
 		Foreground(t.InProgress).
 		Bold(true)
 	boxWidth := width - 4
-	if boxWidth < 20 {
-		boxWidth = 20
+	if boxWidth < MinBoxWidth {
+		boxWidth = MinBoxWidth
 	}
 	topBorder := "╔" + strings.Repeat("═", boxWidth-2) + "╗"
 	bottomBorder := "╚" + strings.Repeat("═", boxWidth-2) + "╝"
