@@ -29,14 +29,7 @@ type ReviewSaveResult struct {
 	Errors []error
 }
 
-// NewReviewSaver creates the appropriate saver based on detected beads version
-func NewReviewSaver(workspaceRoot string) (ReviewSaver, BeadsVersion) {
-	version := DetectBeadsVersion(workspaceRoot)
-
-	switch version {
-	case BeadsVersionModern:
-		return NewModernReviewSaver(workspaceRoot), version
-	default:
-		return NewLegacyReviewSaver(workspaceRoot), version
-	}
+// NewReviewSaver creates a saver that persists reviews as comments
+func NewReviewSaver(workspaceRoot string) ReviewSaver {
+	return NewLegacyReviewSaver(workspaceRoot)
 }

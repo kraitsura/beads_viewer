@@ -64,6 +64,10 @@ type ReviewDashboardModel struct {
 	quitting    bool
 	saveOnQuit  bool
 
+	// Copy feedback for prompt
+	promptCopied   bool
+	promptCopiedAt time.Time
+
 	// Assignee input
 	showAssigneeInput bool
 	assigneeInput     string
@@ -104,6 +108,7 @@ func NewReviewDashboardModel(rootID string, issues []model.Issue, reviewer strin
 	}
 
 	m.rebuildFlatNodes()
+	m.loadReviewStateFromComments()
 	return m, nil
 }
 
@@ -254,13 +259,15 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 				// Copy simple summary to clipboard
 				prompt := m.generateSimplePrompt()
 				if err := clipboard.WriteAll(prompt); err == nil {
-					// Success - could show feedback but we're quitting anyway
+					m.promptCopied = true
+					m.promptCopiedAt = time.Now()
 				}
 			case "P":
 				// Copy full review prompt with instructions
 				prompt := m.generateFullPrompt()
 				if err := clipboard.WriteAll(prompt); err == nil {
-					// Success
+					m.promptCopied = true
+					m.promptCopiedAt = time.Now()
 				}
 			}
 		}
@@ -340,6 +347,12 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 			case "backspace":
 				if len(m.labelInput) > 0 {
 					m.labelInput = m.labelInput[:len(m.labelInput)-1]
+				} else if len(m.activeLabels) > 0 {
+					// Remove last label when input is empty
+					m.activeLabels = m.activeLabels[:len(m.activeLabels)-1]
+					m.rebuildFlatNodes()
+					m.cursor = 0
+					m.scroll = 0
 				}
 				return m, nil
 			default:
@@ -532,11 +545,11 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 		case "/":
 			m.showSearch = true
 			m.searchQuery = ""
-		case "l":
+		case "s":
 			m.showLabelInput = true
 			m.labelInput = ""
-		case "L":
-			// Clear all label filters
+		case "S":
+			// Clear all scope filters
 			m.activeLabels = nil
 			m.rebuildFlatNodes()
 			m.cursor = 0
@@ -548,8 +561,8 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 				m.showAssigneeInput = true
 			}
 		case "q", "esc":
-			// Only show summary if changes were made
-			if m.itemsReviewed > 0 {
+			// Only show summary if there are pending review actions
+			if m.collector.Count() > 0 {
 				m.showSummary = true
 			} else {
 				// No changes - quit directly
@@ -738,13 +751,19 @@ func (m *ReviewDashboardModel) renderSummary() string {
 	b.WriteString(statsHeaderStyle.Render("Overall Progress:") + "\n")
 	b.WriteString(fmt.Sprintf("  %d/%d items reviewed (%d%%)\n\n", reviewed, total, pct))
 
+	// Copy feedback
+	if m.promptCopied && time.Since(m.promptCopiedAt) < 2*time.Second {
+		copiedStyle := t.Renderer.NewStyle().Foreground(t.Open).Bold(true)
+		b.WriteString(copiedStyle.Render("✓ Copied to clipboard!") + "\n\n")
+	}
+
 	// Hints
 	hintStyle := t.Renderer.NewStyle().Faint(true)
 	keyStyle := t.Renderer.NewStyle().Foreground(t.Primary)
 	b.WriteString(keyStyle.Render("q") + hintStyle.Render(" save & quit  "))
 	b.WriteString(keyStyle.Render("Q") + hintStyle.Render(" discard & quit\n"))
 	b.WriteString(keyStyle.Render("p") + hintStyle.Render(" copy ID list  "))
-	b.WriteString(keyStyle.Render("P") + hintStyle.Render(" fix issues\n"))
+	b.WriteString(keyStyle.Render("P") + hintStyle.Render(" copy AI prompt\n"))
 	b.WriteString(keyStyle.Render("Esc") + hintStyle.Render(" continue reviewing"))
 
 	// Wrap in centered box (same style as LabelTreeReviewModel)
@@ -793,8 +812,8 @@ func (m *ReviewDashboardModel) renderHelp() string {
 	// Filters
 	b.WriteString(sectionStyle.Render("Filters") + "\n")
 	b.WriteString(keyStyle.Render("  f") + descStyle.Render("          Cycle: all → unreviewed → needs_revision") + "\n")
-	b.WriteString(keyStyle.Render("  l") + descStyle.Render("          Add label filter") + "\n")
-	b.WriteString(keyStyle.Render("  L") + descStyle.Render("          Clear all label filters") + "\n\n")
+	b.WriteString(keyStyle.Render("  s") + descStyle.Render("          Add scope filter") + "\n")
+	b.WriteString(keyStyle.Render("  S") + descStyle.Render("          Clear all scope filters") + "\n\n")
 
 	// Other
 	b.WriteString(sectionStyle.Render("Other") + "\n")
@@ -956,7 +975,7 @@ func (m *ReviewDashboardModel) renderLabelInput() string {
 	tagStyle := m.theme.Renderer.NewStyle().Foreground(m.theme.Secondary)
 
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Add Label Filter") + "\n\n")
+	b.WriteString(titleStyle.Render("Add Scope Filter") + "\n\n")
 
 	// Show current labels
 	if len(m.activeLabels) > 0 {
@@ -972,7 +991,7 @@ func (m *ReviewDashboardModel) renderLabelInput() string {
 
 	b.WriteString(labelStyle.Render("Label:") + "\n")
 	b.WriteString(inputStyle.Render(m.labelInput+"█") + "\n\n")
-	b.WriteString(hintStyle.Render("[Enter] Add  [Esc] Cancel  [L] Clear all"))
+	b.WriteString(hintStyle.Render("[Enter] Add  [Esc] Cancel  [Backspace] Remove last  [S] Clear all"))
 
 	boxStyle := m.theme.Renderer.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1030,7 +1049,21 @@ func (m *ReviewDashboardModel) renderDetailPanel() string {
 	default:
 		reviewStyle = m.theme.Renderer.NewStyle().Foreground(m.theme.Subtext).Bold(true)
 	}
-	b.WriteString(reviewStyle.Render(reviewLine) + "\n\n")
+	b.WriteString(reviewStyle.Render(reviewLine) + "\n")
+
+	// Labels section
+	if len(issue.Labels) > 0 {
+		tagStyle := m.theme.Renderer.NewStyle().Foreground(m.theme.Secondary)
+		b.WriteString("Labels: ")
+		for i, label := range issue.Labels {
+			if i > 0 {
+				b.WriteString(" ")
+			}
+			b.WriteString(tagStyle.Render("[" + label + "]"))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	// Description section
 	if issue.Description != "" {
@@ -1679,7 +1712,7 @@ func (m *ReviewDashboardModel) SaveReviews() *review.ReviewSaveResult {
 		return &review.ReviewSaveResult{Saved: 0, Failed: 0, Errors: nil}
 	}
 
-	saver, _ := review.NewReviewSaver(m.workspaceRoot)
+	saver := review.NewReviewSaver(m.workspaceRoot)
 	defer saver.Close()
 
 	actions := m.collector.Actions()
@@ -1689,6 +1722,40 @@ func (m *ReviewDashboardModel) SaveReviews() *review.ReviewSaveResult {
 		Saved:  saved,
 		Failed: len(actions) - saved,
 		Errors: errors,
+	}
+}
+
+// loadReviewStateFromComments parses existing comments to load review state
+func (m *ReviewDashboardModel) loadReviewStateFromComments() {
+	// Load state for root issue
+	if m.tree.Root != nil {
+		m.loadIssueReviewState(m.tree.Root)
+	}
+
+	// Load state for all descendants
+	for _, issue := range m.tree.Descendants {
+		m.loadIssueReviewState(issue)
+	}
+}
+
+// loadIssueReviewState loads review state for a single issue from its comments
+func (m *ReviewDashboardModel) loadIssueReviewState(issue *model.Issue) {
+	if issue == nil || len(issue.Comments) == 0 {
+		return
+	}
+
+	// Collect comment texts
+	commentTexts := make([]string, len(issue.Comments))
+	for i, c := range issue.Comments {
+		commentTexts[i] = c.Text
+	}
+
+	// Parse to find latest review
+	status, reviewer, reviewedAt, found := review.GetLatestReviewFromComments(commentTexts)
+	if found {
+		issue.ReviewStatus = status
+		issue.ReviewedBy = reviewer
+		issue.ReviewedAt = reviewedAt
 	}
 }
 
@@ -1742,41 +1809,92 @@ func (m *ReviewDashboardModel) generateFullPrompt() string {
 	}
 
 	var b strings.Builder
-	b.WriteString("# Review Session - Action Required\n\n")
-	b.WriteString("The following issues have been reviewed and require updates.\n")
-	b.WriteString("Please update each bead based on its review status and notes.\n\n")
-	b.WriteString("---\n\n")
 
-	for _, action := range actions {
-		b.WriteString(fmt.Sprintf("## %s\n\n", action.IssueID))
-		b.WriteString(fmt.Sprintf("**Review Status:** %s\n", action.Status))
+	// Header with context
+	b.WriteString("# Review Session Summary\n\n")
+	b.WriteString("You are reviewing a beads issue tracking session. ")
+	b.WriteString("Go over the review feedback and suggest changes.\n\n")
 
-		// Add issue context if available
-		if issue := m.findIssueByID(action.IssueID); issue != nil {
-			b.WriteString(fmt.Sprintf("**Title:** %s\n", issue.Title))
-			b.WriteString(fmt.Sprintf("**Type:** %s | **Priority:** %d\n", issue.IssueType, issue.Priority))
-		}
-
-		if action.Notes != "" {
-			b.WriteString(fmt.Sprintf("\n**Review Notes:**\n%s\n", action.Notes))
-		}
-
-		// Add recommended action based on status
-		b.WriteString("\n**Recommended Action:**\n")
-		switch action.Status {
+	// Count by status
+	approved, revision, deferred := 0, 0, 0
+	for _, a := range actions {
+		switch a.Status {
 		case model.ReviewStatusApproved:
-			b.WriteString("- Issue approved. Mark as ready for implementation or close if complete.\n")
-			b.WriteString(fmt.Sprintf("- Run: `bd update %s --status=in_progress` to begin work, or `bd close %s` if done.\n", action.IssueID, action.IssueID))
+			approved++
 		case model.ReviewStatusNeedsRevision:
-			b.WriteString("- Issue needs revision based on review feedback.\n")
-			b.WriteString("- Address the review notes above, then re-submit for review.\n")
-			b.WriteString(fmt.Sprintf("- Run: `bd show %s` to see full details.\n", action.IssueID))
+			revision++
 		case model.ReviewStatusDeferred:
-			b.WriteString("- Issue deferred for later consideration.\n")
-			b.WriteString("- No immediate action required.\n")
+			deferred++
 		}
-		b.WriteString("\n---\n\n")
 	}
+
+	// Session stats
+	b.WriteString("## Session Stats\n")
+	b.WriteString(fmt.Sprintf("- Approved: %d issues\n", approved))
+	b.WriteString(fmt.Sprintf("- Needs Revision: %d issues\n", revision))
+	b.WriteString(fmt.Sprintf("- Deferred: %d issues\n\n", deferred))
+
+	// Approved issues (brief list)
+	if approved > 0 {
+		b.WriteString("## Approved Issues\n")
+		for _, a := range actions {
+			if a.Status == model.ReviewStatusApproved {
+				issue := m.findIssueByID(a.IssueID)
+				title := a.IssueID
+				if issue != nil {
+					title = issue.Title
+				}
+				b.WriteString(fmt.Sprintf("- `%s`: %s\n", a.IssueID, title))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	// Issues needing revision (detailed with notes)
+	if revision > 0 {
+		b.WriteString("## Issues Needing Revision\n")
+		for _, a := range actions {
+			if a.Status == model.ReviewStatusNeedsRevision {
+				issue := m.findIssueByID(a.IssueID)
+				title := a.IssueID
+				if issue != nil {
+					title = issue.Title
+				}
+				b.WriteString(fmt.Sprintf("### `%s`: %s\n", a.IssueID, title))
+				if a.Notes != "" {
+					b.WriteString(fmt.Sprintf("**Review Notes:** %s\n", a.Notes))
+				}
+				b.WriteString("**Action Required:** Review feedback and suggest implementation changes.\n\n")
+			}
+		}
+	}
+
+	// Deferred issues (with reason if provided)
+	if deferred > 0 {
+		b.WriteString("## Deferred Issues\n")
+		for _, a := range actions {
+			if a.Status == model.ReviewStatusDeferred {
+				issue := m.findIssueByID(a.IssueID)
+				title := a.IssueID
+				if issue != nil {
+					title = issue.Title
+				}
+				b.WriteString(fmt.Sprintf("### `%s`: %s\n", a.IssueID, title))
+				if a.Notes != "" {
+					b.WriteString(fmt.Sprintf("**Reason:** %s\n\n", a.Notes))
+				} else {
+					b.WriteString("\n")
+				}
+			}
+		}
+	}
+
+	// Instructions footer
+	b.WriteString("---\n\n")
+	b.WriteString("For each issue with review feedback:\n")
+	b.WriteString("1. Analyze the review notes\n")
+	b.WriteString("2. Suggest concrete changes based on feedback\n")
+	b.WriteString("3. Explain current bead state and dependencies\n")
 
 	return b.String()
 }
