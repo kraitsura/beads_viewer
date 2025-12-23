@@ -142,6 +142,14 @@ func (d DepthOption) String() string {
 	return fmt.Sprintf("%d", d)
 }
 
+// EdgeType indicates the relationship type between parent and child nodes
+type EdgeType int
+
+const (
+	EdgeBlocking    EdgeType = iota // Parent blocks child (dependency relationship)
+	EdgeParentChild                 // Parent is parent of child (hierarchy relationship)
+)
+
 // LensTreeNode represents a node in the dependency tree
 type LensTreeNode struct {
 	Issue         model.Issue
@@ -153,15 +161,16 @@ type LensTreeNode struct {
 	IsLastChild   bool             // for rendering tree lines
 	ParentPath    []bool           // track which ancestors are last children (for tree lines)
 	IsUpstream    bool             // true if this is a blocker of the entry point
+	EdgeToParent  EdgeType         // relationship type to parent (blocking vs parent-child)
 }
 
 // LensFlatNode is a flattened tree node for display/navigation
 type LensFlatNode struct {
 	Node          *LensTreeNode
 	TreePrefix    string // rendered tree prefix (├─►, └─►, etc.)
-	Status        string // ready, blocked, in_progress, closed
-	BlockedBy     string // ID of blocker if blocked
-	BlockerInTree bool   // true if BlockedBy is visible as ancestor in tree
+	Status        string   // ready, blocked, in_progress, closed
+	BlockedBy     []string // IDs of all blockers if blocked
+	BlockerInTree bool     // true if any blocker is visible as ancestor in tree
 }
 
 // LensDashboardModel represents the label dashboard view
@@ -178,7 +187,7 @@ type LensDashboardModel struct {
 	issueMap    map[string]*model.Issue
 	primaryIDs  map[string]bool      // Issues that have the label (expanded via parent-child)
 	directPrimaryIDs map[string]bool // Issues that directly have the label (not expanded)
-	blockedByMap map[string]string   // issue ID -> blocking issue ID
+	blockedByMap map[string][]string // issue ID -> all blocking issue IDs
 	topoRanks    map[string]int     // issue ID -> topological rank (for dependency-aware sorting)
 
 	// Ego-centered view (for epic/bead modes)
@@ -196,8 +205,9 @@ type LensDashboardModel struct {
 	epicDescendantsByDepth map[DepthOption]map[string]bool
 
 	// Dependency graphs
-	downstream map[string][]string // issue ID -> issues it unblocks (blocks + parent-child)
-	upstream   map[string][]string // issue ID -> issues that block it
+	downstream     map[string][]string   // issue ID -> issues it unblocks (blocks + parent-child)
+	upstream       map[string][]string   // issue ID -> issues that block it
+	edgeTypes      map[string]EdgeType   // "from:to" -> edge type (for visual distinction)
 
 	// Dependency expansion
 	dependencyDepth DepthOption
@@ -447,7 +457,7 @@ func (m *LensDashboardModel) getIssueStatus(issue model.Issue) string {
 	if issue.Status == model.StatusBlocked {
 		return "blocked"
 	}
-	if m.blockedByMap[issue.ID] != "" {
+	if len(m.blockedByMap[issue.ID]) > 0 {
 		return "blocked"
 	}
 	return "ready"

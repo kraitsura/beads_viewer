@@ -233,22 +233,24 @@ func (m *LensDashboardModel) buildGroupedByPriority() []analysis.Workstream {
 	return result
 }
 
-// buildGroupedByStatus groups issues by status
+// buildGroupedByStatus groups issues by computed status (considers implicit blocking)
 func (m *LensDashboardModel) buildGroupedByStatus() []analysis.Workstream {
-	statusNames := map[model.Status]string{
-		model.StatusOpen:       "Open",
-		model.StatusInProgress: "In Progress",
-		model.StatusBlocked:    "Blocked",
-		model.StatusClosed:     "Closed",
+	statusNames := map[string]string{
+		"open":        "Open",
+		"in_progress": "In Progress",
+		"blocked":     "Blocked",
+		"closed":      "Closed",
 	}
-	statusOrder := []model.Status{model.StatusOpen, model.StatusInProgress, model.StatusBlocked, model.StatusClosed}
-	groups := make(map[model.Status][]model.Issue)
+	statusOrder := []string{"open", "in_progress", "blocked", "closed"}
+	groups := make(map[string][]model.Issue)
 
 	for _, issue := range m.allIssues {
 		if !m.primaryIDs[issue.ID] {
 			continue
 		}
-		groups[issue.Status] = append(groups[issue.Status], issue)
+		// Use computed status which checks blockedByMap for implicit blocking
+		computedStatus := m.getIssueStatus(issue)
+		groups[computedStatus] = append(groups[computedStatus], issue)
 	}
 
 	var result []analysis.Workstream

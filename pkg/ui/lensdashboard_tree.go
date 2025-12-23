@@ -451,7 +451,8 @@ func buildBeadDescendantsByDepth(beadID string, issues []model.Issue) map[DepthO
 func (m *LensDashboardModel) buildGraphs() {
 	m.downstream = make(map[string][]string)
 	m.upstream = make(map[string][]string)
-	m.blockedByMap = make(map[string]string)
+	m.blockedByMap = make(map[string][]string)
+	m.edgeTypes = make(map[string]EdgeType)
 
 	// Build set of open issues
 	openIssues := make(map[string]bool)
@@ -471,10 +472,11 @@ func (m *LensDashboardModel) buildGraphs() {
 				// And: issue <- dep.DependsOnID (upstream)
 				m.downstream[dep.DependsOnID] = append(m.downstream[dep.DependsOnID], issue.ID)
 				m.upstream[issue.ID] = append(m.upstream[issue.ID], dep.DependsOnID)
+				m.edgeTypes[dep.DependsOnID+":"+issue.ID] = EdgeBlocking
 
-				// Track first open blocker
-				if openIssues[dep.DependsOnID] && m.blockedByMap[issue.ID] == "" {
-					m.blockedByMap[issue.ID] = dep.DependsOnID
+				// Track all open blockers
+				if openIssues[dep.DependsOnID] {
+					m.blockedByMap[issue.ID] = append(m.blockedByMap[issue.ID], dep.DependsOnID)
 				}
 
 			case model.DepParentChild:
@@ -483,6 +485,7 @@ func (m *LensDashboardModel) buildGraphs() {
 				// And: issue <- dep.DependsOnID (upstream/parent)
 				m.downstream[dep.DependsOnID] = append(m.downstream[dep.DependsOnID], issue.ID)
 				m.upstream[issue.ID] = append(m.upstream[issue.ID], dep.DependsOnID)
+				m.edgeTypes[dep.DependsOnID+":"+issue.ID] = EdgeParentChild
 				// Note: parent-child doesn't create blocking relationships
 			}
 		}
@@ -617,7 +620,7 @@ func (m *LensDashboardModel) buildTree() {
 			continue
 		}
 		isLast := i == len(rootIssues)-1
-		node := m.buildTreeNode(issue, 0, maxDepth, seen, isLast, nil)
+		node := m.buildTreeNode(issue, 0, maxDepth, seen, isLast, nil, "")
 		if node != nil {
 			m.roots = append(m.roots, node)
 		}
@@ -647,7 +650,7 @@ func (m *LensDashboardModel) buildTree() {
 }
 
 // buildTreeNode recursively builds a tree node
-func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool) *LensTreeNode {
+func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, parentID string) *LensTreeNode {
 	if seen[issue.ID] {
 		return nil
 	}
@@ -656,13 +659,22 @@ func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth in
 	// Use depth-appropriate primary IDs for IsPrimary determination
 	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
 
+	// Look up edge type from parent
+	edgeType := EdgeBlocking // default for roots or unknown
+	if parentID != "" {
+		if et, ok := m.edgeTypes[parentID+":"+issue.ID]; ok {
+			edgeType = et
+		}
+	}
+
 	node := &LensTreeNode{
-		Issue:       issue,
-		IsPrimary:   depthPrimaryIDs[issue.ID],
-		IsEntryEpic: (m.viewMode == "epic" || m.viewMode == "bead") && issue.ID == m.epicID,
-		Depth:       depth,
-		IsLastChild: isLast,
-		ParentPath:  append([]bool{}, parentPath...),
+		Issue:        issue,
+		IsPrimary:    depthPrimaryIDs[issue.ID],
+		IsEntryEpic:  (m.viewMode == "epic" || m.viewMode == "bead") && issue.ID == m.epicID,
+		Depth:        depth,
+		IsLastChild:  isLast,
+		ParentPath:   append([]bool{}, parentPath...),
+		EdgeToParent: edgeType,
 	}
 
 	// Update stats
@@ -713,7 +725,7 @@ func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth in
 		newParentPath := append(parentPath, isLast)
 		for i, child := range childIssues {
 			childIsLast := i == len(childIssues)-1
-			childNode := m.buildTreeNode(child, depth+1, maxDepth, seen, childIsLast, newParentPath)
+			childNode := m.buildTreeNode(child, depth+1, maxDepth, seen, childIsLast, newParentPath, issue.ID)
 			if childNode != nil {
 				node.Children = append(node.Children, childNode)
 			}
@@ -838,7 +850,7 @@ func (m *LensDashboardModel) addUpstreamContextBlockers(seen map[string]bool, ma
 			continue
 		}
 		isLast := i == len(contextRoots)-1
-		node := m.buildContextBlockerNode(issue, 0, maxDepth, seen, isLast, nil, allContextBlockers)
+		node := m.buildContextBlockerNode(issue, 0, maxDepth, seen, isLast, nil, allContextBlockers, "")
 		if node != nil {
 			contextNodes = append(contextNodes, node)
 		}
@@ -852,7 +864,7 @@ func (m *LensDashboardModel) addUpstreamContextBlockers(seen map[string]bool, ma
 
 // buildContextBlockerNode builds a tree node for context blockers,
 // following downstream within the context blocker set
-func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, contextBlockerSet map[string]bool) *LensTreeNode {
+func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, contextBlockerSet map[string]bool, parentID string) *LensTreeNode {
 	if seen[issue.ID] {
 		return nil
 	}
@@ -861,12 +873,21 @@ func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, m
 	// Use depth-appropriate primary IDs for IsPrimary determination
 	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
 
+	// Look up edge type from parent
+	edgeType := EdgeBlocking // default for roots or unknown
+	if parentID != "" {
+		if et, ok := m.edgeTypes[parentID+":"+issue.ID]; ok {
+			edgeType = et
+		}
+	}
+
 	node := &LensTreeNode{
-		Issue:       issue,
-		IsPrimary:   depthPrimaryIDs[issue.ID],
-		Depth:       depth,
-		IsLastChild: isLast,
-		ParentPath:  append([]bool{}, parentPath...),
+		Issue:        issue,
+		IsPrimary:    depthPrimaryIDs[issue.ID],
+		Depth:        depth,
+		IsLastChild:  isLast,
+		ParentPath:   append([]bool{}, parentPath...),
+		EdgeToParent: edgeType,
 	}
 
 	// Update stats
@@ -918,7 +939,7 @@ func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, m
 		newParentPath := append(parentPath, isLast)
 		for i, child := range childIssues {
 			childIsLast := i == len(childIssues)-1
-			childNode := m.buildContextBlockerNode(child, depth+1, maxDepth, seen, childIsLast, newParentPath, contextBlockerSet)
+			childNode := m.buildContextBlockerNode(child, depth+1, maxDepth, seen, childIsLast, newParentPath, contextBlockerSet, issue.ID)
 			if childNode != nil {
 				node.Children = append(node.Children, childNode)
 			}
@@ -972,14 +993,23 @@ func (m *LensDashboardModel) flattenTree() {
 func (m *LensDashboardModel) flattenNode(node *LensTreeNode, ancestors map[string]bool) {
 	prefix := m.buildTreePrefix(node)
 	status := m.getIssueStatus(node.Issue)
-	blockerID := m.blockedByMap[node.Issue.ID]
+	blockerIDs := m.blockedByMap[node.Issue.ID]
+
+	// Check if any blocker is visible in the tree
+	blockerInTree := false
+	for _, bid := range blockerIDs {
+		if ancestors[bid] {
+			blockerInTree = true
+			break
+		}
+	}
 
 	fn := LensFlatNode{
 		Node:          node,
 		TreePrefix:    prefix,
 		Status:        status,
-		BlockedBy:     blockerID,
-		BlockerInTree: ancestors[blockerID],
+		BlockedBy:     blockerIDs,
+		BlockerInTree: blockerInTree,
 	}
 	m.flatNodes = append(m.flatNodes, fn)
 
@@ -1152,7 +1182,8 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 			continue
 		}
 		isLast := i == len(downstreamIssues)-1
-		node := m.buildCenteredTreeNode(issue, 1, maxDepth, seen, isLast, nil, depthPrimaryIDs)
+		// These are direct children of the ego node (epicID), so pass epicID as parentID
+		node := m.buildCenteredTreeNode(issue, 1, maxDepth, seen, isLast, nil, depthPrimaryIDs, m.epicID)
 		if node != nil {
 			m.roots = append(m.roots, node)
 		}
@@ -1197,11 +1228,19 @@ func (m *LensDashboardModel) getCenteredAncestors() map[string]bool {
 }
 
 // buildCenteredTreeNode builds a tree node with relative depth tracking
-func (m *LensDashboardModel) buildCenteredTreeNode(issue model.Issue, relDepth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, depthPrimaryIDs map[string]bool) *LensTreeNode {
+func (m *LensDashboardModel) buildCenteredTreeNode(issue model.Issue, relDepth, maxDepth int, seen map[string]bool, isLast bool, parentPath []bool, depthPrimaryIDs map[string]bool, parentID string) *LensTreeNode {
 	if seen[issue.ID] {
 		return nil
 	}
 	seen[issue.ID] = true
+
+	// Look up edge type from parent
+	edgeType := EdgeBlocking // default for roots or unknown
+	if parentID != "" {
+		if et, ok := m.edgeTypes[parentID+":"+issue.ID]; ok {
+			edgeType = et
+		}
+	}
 
 	node := &LensTreeNode{
 		Issue:         issue,
@@ -1211,6 +1250,7 @@ func (m *LensDashboardModel) buildCenteredTreeNode(issue model.Issue, relDepth, 
 		RelativeDepth: relDepth,
 		IsLastChild:   isLast,
 		ParentPath:    append([]bool{}, parentPath...),
+		EdgeToParent:  edgeType,
 	}
 
 	// Update stats
@@ -1261,7 +1301,7 @@ func (m *LensDashboardModel) buildCenteredTreeNode(issue model.Issue, relDepth, 
 		newParentPath := append(parentPath, isLast)
 		for i, child := range childIssues {
 			childIsLast := i == len(childIssues)-1
-			childNode := m.buildCenteredTreeNode(child, relDepth+1, maxDepth, seen, childIsLast, newParentPath, depthPrimaryIDs)
+			childNode := m.buildCenteredTreeNode(child, relDepth+1, maxDepth, seen, childIsLast, newParentPath, depthPrimaryIDs, issue.ID)
 			if childNode != nil {
 				node.Children = append(node.Children, childNode)
 			}
@@ -1273,10 +1313,12 @@ func (m *LensDashboardModel) buildCenteredTreeNode(issue model.Issue, relDepth, 
 
 // isIssueBlockedByDeps checks if an issue is blocked by dependencies
 func (m *LensDashboardModel) isIssueBlockedByDeps(issueID string) bool {
-	return m.blockedByMap[issueID] != ""
+	return len(m.blockedByMap[issueID]) > 0
 }
 // buildTreePrefix builds the tree line prefix for a node
-// Uses refined minimal connectors: ├─ └─ │
+// Uses refined minimal connectors with edge type distinction:
+// - Parent-child edges: ├─ └─ (standard tree lines)
+// - Blocking edges: ├▸ └▸ (arrow indicates blocking relationship)
 func (m *LensDashboardModel) buildTreePrefix(node *LensTreeNode) string {
 	if node.Depth == 0 {
 		return ""
@@ -1293,11 +1335,22 @@ func (m *LensDashboardModel) buildTreePrefix(node *LensTreeNode) string {
 		}
 	}
 
-	// Refined minimal connectors
-	if node.IsLastChild {
-		prefix.WriteString("└─")
+	// Use different connectors based on edge type
+	// ├▸ / └▸ = blocking relationship (arrow shows dependency direction)
+	// ├─ / └─ = parent-child relationship (line shows hierarchy)
+	if node.EdgeToParent == EdgeParentChild {
+		if node.IsLastChild {
+			prefix.WriteString("└─")
+		} else {
+			prefix.WriteString("├─")
+		}
 	} else {
-		prefix.WriteString("├─")
+		// Blocking relationship (default)
+		if node.IsLastChild {
+			prefix.WriteString("└▸")
+		} else {
+			prefix.WriteString("├▸")
+		}
 	}
 
 	return prefix.String()

@@ -405,9 +405,13 @@ func (m *LensDashboardModel) renderEgoNodeLine(fn LensFlatNode, isSelected bool,
 
 	// Status indicator (only show if blocker not already visible in tree)
 	statusSuffix := ""
-	if fn.Status == "blocked" && fn.BlockedBy != "" && !fn.BlockerInTree {
+	if fn.Status == "blocked" && len(fn.BlockedBy) > 0 && !fn.BlockerInTree {
 		blockerStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
-		statusSuffix = blockerStyle.Render(" ◄ " + fn.BlockedBy)
+		blockerText := fn.BlockedBy[0]
+		if len(fn.BlockedBy) > 1 {
+			blockerText += fmt.Sprintf(" +%d", len(fn.BlockedBy)-1)
+		}
+		statusSuffix = blockerStyle.Render(" ◄ " + blockerText)
 	}
 
 	return fmt.Sprintf("%s%s %s %s%s",
@@ -495,9 +499,13 @@ func (m *LensDashboardModel) renderCenteredNode(fn LensFlatNode, isSelected bool
 
 	// Status indicator for blocked items (only show if blocker not already visible in tree)
 	statusSuffix := ""
-	if fn.Status == "blocked" && fn.BlockedBy != "" && !fn.BlockerInTree {
+	if fn.Status == "blocked" && len(fn.BlockedBy) > 0 && !fn.BlockerInTree {
 		blockerStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
-		statusSuffix = blockerStyle.Render(" ◄ " + fn.BlockedBy)
+		blockerText := fn.BlockedBy[0]
+		if len(fn.BlockedBy) > 1 {
+			blockerText += fmt.Sprintf(" +%d", len(fn.BlockedBy)-1)
+		}
+		statusSuffix = blockerStyle.Render(" ◄ " + blockerText)
 	}
 
 	return fmt.Sprintf("%s%s %s%s %s%s",
@@ -1176,9 +1184,13 @@ func (m *LensDashboardModel) renderTreeNode(fn LensFlatNode, isSelected bool, ma
 
 	// Status indicator for blocked items (only show if blocker not already visible in tree)
 	statusSuffix := ""
-	if fn.Status == "blocked" && fn.BlockedBy != "" && !fn.BlockerInTree {
+	if fn.Status == "blocked" && len(fn.BlockedBy) > 0 && !fn.BlockerInTree {
 		blockerStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
-		statusSuffix = blockerStyle.Render(" ◄ " + fn.BlockedBy)
+		blockerText := fn.BlockedBy[0]
+		if len(fn.BlockedBy) > 1 {
+			blockerText += fmt.Sprintf(" +%d", len(fn.BlockedBy)-1)
+		}
+		statusSuffix = blockerStyle.Render(" ◄ " + blockerText)
 	}
 
 	return fmt.Sprintf("%s%s %s%s %s%s%s",
