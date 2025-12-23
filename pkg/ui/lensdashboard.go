@@ -179,6 +179,7 @@ type LensDashboardModel struct {
 	primaryIDs  map[string]bool      // Issues that have the label (expanded via parent-child)
 	directPrimaryIDs map[string]bool // Issues that directly have the label (not expanded)
 	blockedByMap map[string]string   // issue ID -> blocking issue ID
+	topoRanks    map[string]int     // issue ID -> topological rank (for dependency-aware sorting)
 
 	// Ego-centered view (for epic/bead modes)
 	centeredMode  bool        // true = ego-centered layout, false = flat tree

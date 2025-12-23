@@ -11,6 +11,150 @@ import (
 // TREE BUILDING - Dependency tree construction and traversal
 // ══════════════════════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════════════════════
+// TOPOLOGICAL SORTING - Dependency-aware ordering for flat view
+// ══════════════════════════════════════════════════════════════════════════════
+
+// computeBlockingTopoRanks computes topological ranks for issues based on blocking relationships.
+// Issues with no blockers get rank 0, issues blocked by rank-0 issues get rank 1, etc.
+// This ensures blockers always appear before the issues they block within the same status level.
+// Returns a map of issue ID -> topological rank.
+func (m *LensDashboardModel) computeBlockingTopoRanks(issueIDs map[string]bool) map[string]int {
+	ranks := make(map[string]int)
+
+	// Build in-degree map (number of open blockers within the set)
+	inDegree := make(map[string]int)
+	for id := range issueIDs {
+		inDegree[id] = 0
+	}
+
+	// Count blockers within the issue set
+	for id := range issueIDs {
+		for _, blockerID := range m.upstream[id] {
+			// Only count blockers that are in our set and open
+			if issueIDs[blockerID] {
+				if blocker, ok := m.issueMap[blockerID]; ok && blocker.Status != model.StatusClosed {
+					inDegree[id]++
+				}
+			}
+		}
+	}
+
+	// Kahn's algorithm for topological sort
+	// Start with issues that have no blockers (in-degree 0)
+	currentRank := 0
+	queue := make([]string, 0)
+	for id, deg := range inDegree {
+		if deg == 0 {
+			queue = append(queue, id)
+			ranks[id] = currentRank
+		}
+	}
+
+	for len(queue) > 0 {
+		// Process all issues at current rank
+		nextQueue := make([]string, 0)
+		currentRank++
+
+		for _, id := range queue {
+			// For each issue this one blocks (downstream)
+			for _, blockedID := range m.downstream[id] {
+				if !issueIDs[blockedID] {
+					continue
+				}
+				inDegree[blockedID]--
+				if inDegree[blockedID] == 0 {
+					ranks[blockedID] = currentRank
+					nextQueue = append(nextQueue, blockedID)
+				}
+			}
+		}
+		queue = nextQueue
+	}
+
+	// Handle cycles: any remaining issues with in-degree > 0 are in a cycle
+	// Assign them a high rank so they appear at the end
+	maxRank := currentRank
+	for id := range issueIDs {
+		if _, hasRank := ranks[id]; !hasRank {
+			ranks[id] = maxRank + 1
+		}
+	}
+
+	return ranks
+}
+
+// sortByStatusThenTopoThenPriority sorts issues by: status order, then topological rank, then priority.
+// This ensures blockers appear before blocked issues within the same status level.
+func (m *LensDashboardModel) sortByStatusThenTopoThenPriority(issues []model.Issue, topoRanks map[string]int) {
+	sort.Slice(issues, func(i, j int) bool {
+		// First: sort by status order (ready < in_progress < blocked < closed)
+		si := m.getStatusOrder(issues[i])
+		sj := m.getStatusOrder(issues[j])
+		if si != sj {
+			return si < sj
+		}
+
+		// Second: within same status, sort by topological rank (blockers first)
+		ri := topoRanks[issues[i].ID]
+		rj := topoRanks[issues[j].ID]
+		if ri != rj {
+			return ri < rj
+		}
+
+		// Third: within same topo rank, sort by priority
+		return issues[i].Priority < issues[j].Priority
+	})
+}
+
+// findContextBlockers finds all context issues (outside primaryIDs) that block primary issues.
+// This is used to properly identify roots and position context blockers in the tree.
+func (m *LensDashboardModel) findContextBlockers(primaryIDs map[string]bool) map[string]bool {
+	contextBlockers := make(map[string]bool)
+
+	// Find direct context blockers of primary issues
+	for _, issue := range m.allIssues {
+		if !primaryIDs[issue.ID] {
+			continue
+		}
+		// Check blockers of this primary issue
+		for _, blockerID := range m.upstream[issue.ID] {
+			if !primaryIDs[blockerID] {
+				// This is a context blocker
+				if blocker, ok := m.issueMap[blockerID]; ok {
+					if blocker.Status != model.StatusClosed {
+						contextBlockers[blockerID] = true
+					}
+				}
+			}
+		}
+	}
+
+	// BFS to find transitive context blockers (blockers of blockers)
+	toVisit := make([]string, 0, len(contextBlockers))
+	for id := range contextBlockers {
+		toVisit = append(toVisit, id)
+	}
+
+	for len(toVisit) > 0 {
+		current := toVisit[0]
+		toVisit = toVisit[1:]
+
+		for _, blockerID := range m.upstream[current] {
+			if !primaryIDs[blockerID] && !contextBlockers[blockerID] {
+				if blocker, ok := m.issueMap[blockerID]; ok {
+					if blocker.Status != model.StatusClosed {
+						contextBlockers[blockerID] = true
+						toVisit = append(toVisit, blockerID)
+					}
+				}
+			}
+		}
+	}
+
+	return contextBlockers
+}
+
 // getDirectChildren returns the direct children of an issue via parent-child relationships
 func getDirectChildren(parentID string, issues []model.Issue) map[string]bool {
 	children := make(map[string]bool)
@@ -371,6 +515,14 @@ func (m *LensDashboardModel) buildTree() {
 	// and depth-specific descendants for epic mode
 	depthPrimaryIDs := m.GetPrimaryIDsForDepth()
 
+	// Compute topological ranks for all issues to enable dependency-aware sorting.
+	// This ensures blockers appear before the issues they block within the same status level.
+	allIssueIDs := make(map[string]bool)
+	for _, issue := range m.allIssues {
+		allIssueIDs[issue.ID] = true
+	}
+	m.topoRanks = m.computeBlockingTopoRanks(allIssueIDs)
+
 	// Find root nodes: primary issues that are "ready" (not blocked by open issues)
 	// Or at depth 1, just show all primary issues flat
 	var rootIssues []model.Issue
@@ -384,24 +536,36 @@ func (m *LensDashboardModel) buildTree() {
 		}
 	} else {
 		// Depth 2+: find ready roots and build trees
-		// Roots are primary issues with no open blockers (or blockers outside primary set)
+		// Roots are primary issues with no open blockers within the visible set
+		// (considering both primary AND context blockers that will be shown)
+
+		// First, identify context blockers that block primary issues
+		contextBlockers := m.findContextBlockers(depthPrimaryIDs)
+		visibleIssues := make(map[string]bool)
+		for id := range depthPrimaryIDs {
+			visibleIssues[id] = true
+		}
+		for id := range contextBlockers {
+			visibleIssues[id] = true
+		}
+
 		for _, issue := range m.allIssues {
 			if !depthPrimaryIDs[issue.ID] {
 				continue
 			}
 
-			// Check if blocked by another primary issue
-			isBlockedByPrimary := false
+			// Check if blocked by another visible issue (primary OR context blocker)
+			isBlockedByVisible := false
 			for _, blockerID := range m.upstream[issue.ID] {
 				if blocker, ok := m.issueMap[blockerID]; ok {
-					if blocker.Status != model.StatusClosed && depthPrimaryIDs[blockerID] {
-						isBlockedByPrimary = true
+					if blocker.Status != model.StatusClosed && visibleIssues[blockerID] {
+						isBlockedByVisible = true
 						break
 					}
 				}
 			}
 
-			if !isBlockedByPrimary {
+			if !isBlockedByVisible {
 				rootIssues = append(rootIssues, issue)
 			}
 		}
@@ -416,7 +580,7 @@ func (m *LensDashboardModel) buildTree() {
 		}
 	}
 
-	// Sort roots: entry point first (when in epic or bead mode), then by status, then priority
+	// Sort roots: entry point first (when in epic or bead mode), then by status, topo rank, priority
 	sort.Slice(rootIssues, func(i, j int) bool {
 		// Entry point (epic or bead) always comes first
 		if (m.viewMode == "epic" || m.viewMode == "bead") && m.epicID != "" {
@@ -427,10 +591,17 @@ func (m *LensDashboardModel) buildTree() {
 				return false
 			}
 		}
+		// Sort by status, then topological rank, then priority
 		si := m.getStatusOrder(rootIssues[i])
 		sj := m.getStatusOrder(rootIssues[j])
 		if si != sj {
 			return si < sj
+		}
+		// Within same status, use topological rank (blockers first)
+		ri := m.topoRanks[rootIssues[i].ID]
+		rj := m.topoRanks[rootIssues[j].ID]
+		if ri != rj {
+			return ri < rj
 		}
 		return rootIssues[i].Priority < rootIssues[j].Priority
 	})
@@ -523,12 +694,18 @@ func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth in
 			}
 		}
 
-		// Sort children by status then priority
+		// Sort children by status, then topological rank, then priority
 		sort.Slice(childIssues, func(i, j int) bool {
 			si := m.getStatusOrder(childIssues[i])
 			sj := m.getStatusOrder(childIssues[j])
 			if si != sj {
 				return si < sj
+			}
+			// Within same status, use topological rank (blockers first)
+			ri := m.topoRanks[childIssues[i].ID]
+			rj := m.topoRanks[childIssues[j].ID]
+			if ri != rj {
+				return ri < rj
 			}
 			return childIssues[i].Priority < childIssues[j].Priority
 		})
@@ -607,12 +784,18 @@ func (m *LensDashboardModel) addUpstreamContextBlockers(seen map[string]bool, ma
 		return
 	}
 
-	// Sort by status (ready first) then priority
+	// Sort by status, then topological rank, then priority
 	sort.Slice(contextBlockers, func(i, j int) bool {
 		si := m.getStatusOrder(contextBlockers[i])
 		sj := m.getStatusOrder(contextBlockers[j])
 		if si != sj {
 			return si < sj
+		}
+		// Within same status, use topological rank (blockers first)
+		ri := m.topoRanks[contextBlockers[i].ID]
+		rj := m.topoRanks[contextBlockers[j].ID]
+		if ri != rj {
+			return ri < rj
 		}
 		return contextBlockers[i].Priority < contextBlockers[j].Priority
 	})
@@ -647,17 +830,23 @@ func (m *LensDashboardModel) addUpstreamContextBlockers(seen map[string]bool, ma
 	}
 
 	// Build tree nodes for context blockers
-	// These will follow downstream within the context blocker set
-	numExistingRoots := len(m.roots)
+	// IMPORTANT: Prepend context blockers to roots so they appear BEFORE the items they block.
+	// This ensures blockers are visible before blocked items in the flat view.
+	var contextNodes []*LensTreeNode
 	for i, issue := range contextRoots {
 		if seen[issue.ID] {
 			continue
 		}
-		isLast := (numExistingRoots == 0) && (i == len(contextRoots)-1)
+		isLast := i == len(contextRoots)-1
 		node := m.buildContextBlockerNode(issue, 0, maxDepth, seen, isLast, nil, allContextBlockers)
 		if node != nil {
-			m.roots = append(m.roots, node)
+			contextNodes = append(contextNodes, node)
 		}
+	}
+
+	// Prepend context blocker nodes to roots
+	if len(contextNodes) > 0 {
+		m.roots = append(contextNodes, m.roots...)
 	}
 }
 
@@ -710,12 +899,18 @@ func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, m
 			}
 		}
 
-		// Sort children by status then priority
+		// Sort children by status, then topological rank, then priority
 		sort.Slice(childIssues, func(i, j int) bool {
 			si := m.getStatusOrder(childIssues[i])
 			sj := m.getStatusOrder(childIssues[j])
 			if si != sj {
 				return si < sj
+			}
+			// Within same status, use topological rank (blockers first)
+			ri := m.topoRanks[childIssues[i].ID]
+			rj := m.topoRanks[childIssues[j].ID]
+			if ri != rj {
+				return ri < rj
 			}
 			return childIssues[i].Priority < childIssues[j].Priority
 		})
@@ -814,6 +1009,13 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 		maxDepth = 100
 	}
 
+	// Compute topological ranks for all issues to enable dependency-aware sorting
+	allIssueIDs := make(map[string]bool)
+	for _, issue := range m.allIssues {
+		allIssueIDs[issue.ID] = true
+	}
+	m.topoRanks = m.computeBlockingTopoRanks(allIssueIDs)
+
 	// Track what we've seen
 	seen := make(map[string]bool)
 
@@ -857,12 +1059,18 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 		}
 	}
 
-	// Sort blockers by status then priority
+	// Sort blockers by status, then topological rank, then priority
 	sort.Slice(blockerIssues, func(i, j int) bool {
 		si := m.getStatusOrder(blockerIssues[i])
 		sj := m.getStatusOrder(blockerIssues[j])
 		if si != sj {
 			return si < sj
+		}
+		// Within same status, use topological rank (blockers first)
+		ri := m.topoRanks[blockerIssues[i].ID]
+		rj := m.topoRanks[blockerIssues[j].ID]
+		if ri != rj {
+			return ri < rj
 		}
 		return blockerIssues[i].Priority < blockerIssues[j].Priority
 	})
@@ -922,12 +1130,18 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 		}
 	}
 
-	// Sort by status then priority
+	// Sort by status, then topological rank, then priority
 	sort.Slice(downstreamIssues, func(i, j int) bool {
 		si := m.getStatusOrder(downstreamIssues[i])
 		sj := m.getStatusOrder(downstreamIssues[j])
 		if si != sj {
 			return si < sj
+		}
+		// Within same status, use topological rank (blockers first)
+		ri := m.topoRanks[downstreamIssues[i].ID]
+		rj := m.topoRanks[downstreamIssues[j].ID]
+		if ri != rj {
+			return ri < rj
 		}
 		return downstreamIssues[i].Priority < downstreamIssues[j].Priority
 	})
@@ -1028,12 +1242,18 @@ func (m *LensDashboardModel) buildCenteredTreeNode(issue model.Issue, relDepth, 
 			}
 		}
 
-		// Sort children by status then priority
+		// Sort children by status, then topological rank, then priority
 		sort.Slice(childIssues, func(i, j int) bool {
 			si := m.getStatusOrder(childIssues[i])
 			sj := m.getStatusOrder(childIssues[j])
 			if si != sj {
 				return si < sj
+			}
+			// Within same status, use topological rank (blockers first)
+			ri := m.topoRanks[childIssues[i].ID]
+			rj := m.topoRanks[childIssues[j].ID]
+			if ri != rj {
+				return ri < rj
 			}
 			return childIssues[i].Priority < childIssues[j].Priority
 		})
