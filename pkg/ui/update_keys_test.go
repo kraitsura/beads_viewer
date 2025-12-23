@@ -26,23 +26,27 @@ func TestUpdateHelpQuitAndTabFocus(t *testing.T) {
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	m = updated.(Model)
-	if m.showHelp || m.focused != focusList {
-		t.Fatalf("expected help overlay dismissed")
+	// In split view mode (width=140), focus returns to detail pane
+	if m.showHelp || m.focused != focusDetail {
+		t.Fatalf("expected help overlay dismissed with focus on detail in split view")
 	}
 
 	// Tab should flip focus in split view
-	if m.focused != focusList {
-		t.Fatalf("expected list focus before tab")
-	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = updated.(Model)
+	// We start with focusDetail (from help dismiss in split view)
 	if m.focused != focusDetail {
-		t.Fatalf("expected detail focus after tab")
+		t.Fatalf("expected detail focus before tab (we were in split view)")
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
+	// Tab from focusDetail → focusList
 	if m.focused != focusList {
-		t.Fatalf("expected list focus after second tab")
+		t.Fatalf("expected list focus after first tab (was detail)")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	// Tab from focusList → focusDetail
+	if m.focused != focusDetail {
+		t.Fatalf("expected detail focus after second tab")
 	}
 
 	// Escape should show quit confirm, 'y' should issue tea.Quit

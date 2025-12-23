@@ -17,8 +17,8 @@ func (m *LensDashboardModel) MoveUp() {
 		return
 	}
 
-	// Handle centered mode navigation
-	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+	// Handle centered mode navigation (epic/bead modes)
+	if (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
 		if m.cursor > 0 {
 			m.cursor--
 			m.selectedIssueID = m.getSelectedIDForCenteredMode()
@@ -51,8 +51,8 @@ func (m *LensDashboardModel) MoveDown() {
 		return
 	}
 
-	// Handle centered mode navigation
-	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+	// Handle centered mode navigation (epic/bead modes)
+	if (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
 		totalNodes := m.getTotalCenteredNodeCount()
 		if m.cursor < totalNodes-1 {
 			m.cursor++
@@ -680,7 +680,7 @@ func (m *LensDashboardModel) findNodeForLine(targetLine int) int {
 
 // ensureCenteredVisible adjusts scroll to keep cursor visible in centered mode
 func (m *LensDashboardModel) ensureCenteredVisible() {
-	if !m.centeredMode || m.egoNode == nil {
+	if m.egoNode == nil {
 		return
 	}
 

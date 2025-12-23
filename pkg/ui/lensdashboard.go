@@ -190,8 +190,7 @@ type LensDashboardModel struct {
 	blockedByMap map[string][]string // issue ID -> all blocking issue IDs
 	topoRanks    map[string]int     // issue ID -> topological rank (for dependency-aware sorting)
 
-	// Ego-centered view (for epic/bead modes)
-	centeredMode  bool        // true = ego-centered layout, false = flat tree
+	// Ego-centered view (for epic/bead modes - automatically used for these view modes)
 	upstreamNodes []LensFlatNode  // Blockers of the entry point (shown above)
 	egoNode       *LensFlatNode   // The entry point itself (center)
 	// roots/flatNodes used for downstream (shown below)
@@ -337,7 +336,6 @@ func NewBeadLensModel(issueID string, allIssues []model.Issue, issueMap map[stri
 		labelName:        issue.Title,
 		viewMode:         "bead",
 		epicID:           issueID, // Reuse epicID field for entry point
-		centeredMode:     true,    // Enable ego-centered view by default for bead mode
 		allIssues:        allIssues,
 		issueMap:         issueMap,
 		theme:            theme,
@@ -375,7 +373,6 @@ func NewEpicLensModel(epicID string, epicTitle string, allIssues []model.Issue, 
 		labelName:        epicTitle,
 		viewMode:         "epic",
 		epicID:           epicID,
-		centeredMode:     true, // Enable ego-centered view by default for epic mode
 		allIssues:        allIssues,
 		issueMap:         issueMap,
 		theme:            theme,
@@ -502,27 +499,10 @@ func (m *LensDashboardModel) CycleDepth() {
 	m.recomputeWorkstreams()
 }
 
-// ToggleCenteredMode toggles between ego-centered and flat view modes
-// Only applicable for epic/bead modes
-func (m *LensDashboardModel) ToggleCenteredMode() {
-	if m.viewMode != "epic" && m.viewMode != "bead" {
-		return // Only toggle for epic/bead modes
-	}
-
-	m.centeredMode = !m.centeredMode
-	m.cursor = 0 // Reset cursor when switching modes
-	m.scroll = 0
-
-	// Rebuild tree with new mode
-	m.buildTree()
-
-	// Recompute workstreams
-	m.recomputeWorkstreams()
-}
-
 // IsCenteredMode returns whether the dashboard is in ego-centered mode
+// Epic and bead modes always use centered view; label mode uses flat view
 func (m *LensDashboardModel) IsCenteredMode() bool {
-	return m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead")
+	return m.viewMode == "epic" || m.viewMode == "bead"
 }
 
 // GetPrimaryIDsForDepth returns the appropriate primaryIDs for the current depth.
@@ -1253,15 +1233,15 @@ func (m *LensDashboardModel) GoToTop() {
 		return
 	}
 
-	// Centered mode
-	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+	// Centered mode (epic/bead)
+	if (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
 		m.cursor = 0
 		m.selectedIssueID = m.getSelectedIDForCenteredMode()
 		m.scroll = 0
 		return
 	}
 
-	// Flat view
+	// Flat view (label mode)
 	if len(m.flatNodes) > 0 {
 		m.cursor = 0
 		m.selectedIssueID = m.flatNodes[m.cursor].Node.Issue.ID
@@ -1320,8 +1300,8 @@ func (m *LensDashboardModel) GoToBottom() {
 		return
 	}
 
-	// Centered mode
-	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+	// Centered mode (epic/bead)
+	if (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
 		totalNodes := m.getTotalCenteredNodeCount()
 		m.cursor = totalNodes - 1
 		m.selectedIssueID = m.getSelectedIDForCenteredMode()
@@ -1329,7 +1309,7 @@ func (m *LensDashboardModel) GoToBottom() {
 		return
 	}
 
-	// Flat view
+	// Flat view (label mode)
 	if len(m.flatNodes) > 0 {
 		m.cursor = len(m.flatNodes) - 1
 		m.selectedIssueID = m.flatNodes[m.cursor].Node.Issue.ID
@@ -1352,8 +1332,8 @@ func (m *LensDashboardModel) PageDown() {
 		return
 	}
 
-	// Centered mode
-	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+	// Centered mode (epic/bead)
+	if (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
 		totalNodes := m.getTotalCenteredNodeCount()
 		m.cursor += pageSize
 		if m.cursor >= totalNodes {
@@ -1364,7 +1344,7 @@ func (m *LensDashboardModel) PageDown() {
 		return
 	}
 
-	// Flat view
+	// Flat view (label mode)
 	if len(m.flatNodes) > 0 {
 		m.cursor += pageSize
 		if m.cursor >= len(m.flatNodes) {
@@ -1390,8 +1370,8 @@ func (m *LensDashboardModel) PageUp() {
 		return
 	}
 
-	// Centered mode
-	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+	// Centered mode (epic/bead)
+	if (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
 		m.cursor -= pageSize
 		if m.cursor < 0 {
 			m.cursor = 0
@@ -1401,7 +1381,7 @@ func (m *LensDashboardModel) PageUp() {
 		return
 	}
 
-	// Flat view
+	// Flat view (label mode)
 	if len(m.flatNodes) > 0 {
 		m.cursor -= pageSize
 		if m.cursor < 0 {

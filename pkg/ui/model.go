@@ -51,6 +51,7 @@ const (
 	focusLabelDashboard
 	focusLensSelector
 	focusLensDashboard
+	focusReviewDashboard
 	focusInsights
 	focusActionable
 	focusRecipePicker
@@ -267,8 +268,9 @@ type Model struct {
 	renderer           *MarkdownRenderer
 	board              BoardModel
 	labelDashboard     LabelDashboardModel
-	lensDashboard      LensDashboardModel  // Advanced tree-based dashboard with workstream support
-	lensSelector       LensSelectorModel   // Lens picker for selecting label/epic/bead to explore
+	lensDashboard      LensDashboardModel   // Advanced tree-based dashboard with workstream support
+	lensSelector       LensSelectorModel    // Lens picker for selecting label/epic/bead to explore
+	reviewDashboard    *ReviewDashboardModel // Review dashboard for reviewing issues
 	velocityComparison VelocityComparisonModel // bv-125
 	shortcutsSidebar   ShortcutsSidebar        // bv-3qi5
 	graphView          GraphModel
@@ -299,6 +301,7 @@ type Model struct {
 	showLabelDrilldown       bool
 	showLensDashboard        bool // Show the lens dashboard (tree view with workstreams)
 	showLensSelector         bool // Show the lens selector picker
+	showReviewDashboard      bool // Show the review dashboard
 	labelHealthDetail        *analysis.LabelHealth
 	labelHealthDetailFlow    labelFlowSummary
 	labelDrilldownLabel      string
@@ -1610,6 +1613,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle lens selector overlay before global keys (esc/q/etc.)
+		if m.showLensSelector || m.focused == focusLensSelector {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			m = m.handleLensSelectorKeys(msg)
+			return m, nil
+		}
+
+		// Handle lens dashboard overlay before global keys (esc/q/etc.)
+		if m.showLensDashboard || m.focused == focusLensDashboard {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			m = m.handleLensDashboardKeys(msg)
+			return m, nil
+		}
+
+		// Handle review dashboard overlay before global keys (esc/q/etc.)
+		if m.showReviewDashboard || m.focused == focusReviewDashboard {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			m = m.handleReviewDashboardKeys(msg)
+			return m, nil
+		}
+
 		// Handle quit confirmation first
 		if m.showQuitConfirm {
 			switch msg.String() {
@@ -2040,13 +2070,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusIsError = false
 				return m, nil
 
-			case "v":
+			case "ctrl+l":
 				// Open lens selector (picker for label/epic/bead exploration)
 				m.clearAttentionOverlay()
 				m.isGraphView = false
 				m.isBoardView = false
 				m.isActionableView = false
 				m.isHistoryView = false
+				// Note: Don't reset isSplitView - it will be restored when exiting lens views
+				m.isSprintView = false
 				m.showLensSelector = true
 				m.focused = focusLensSelector
 				// Initialize lens selector with issues and graph stats
@@ -2677,10 +2709,7 @@ func (m Model) handleLensSelectorKeys(msg tea.KeyMsg) Model {
 	if m.lensSelector.IsConfirmed() {
 		selectedItem := m.lensSelector.SelectedItem()
 		if selectedItem != nil {
-			// Open lens dashboard with selected item
 			m.showLensSelector = false
-			m.showLensDashboard = true
-			m.focused = focusLensDashboard
 
 			// Build issue map
 			issueMap := make(map[string]*model.Issue)
@@ -2689,8 +2718,49 @@ func (m Model) handleLensSelectorKeys(msg tea.KeyMsg) Model {
 			}
 			m.issueMap = issueMap
 
+			// Check if review mode was requested
+			if m.lensSelector.IsReviewRequested() {
+				// Open review dashboard for the selected item
+				// Review dashboard works best with epics/beads that have a tree structure
+				rootID := selectedItem.Value
+				if selectedItem.Type == "label" {
+					// For labels, we can't really review - show a message
+					m.statusMsg = "Review mode works best with epics or beads"
+					m.statusIsError = true
+					m.lensSelector.Reset()
+					return m
+				}
+
+				// Create review dashboard
+				reviewDash, err := NewReviewDashboardModel(rootID, m.issues, "", string(model.ReviewTypePlan), m.theme, m.workDir)
+				if err != nil {
+					m.statusMsg = fmt.Sprintf("Error opening review: %v", err)
+					m.statusIsError = true
+					m.lensSelector.Reset()
+					return m
+				}
+				m.reviewDashboard = reviewDash
+				m.reviewDashboard.SetSize(m.width, m.height-1)
+				m.showReviewDashboard = true
+				m.focused = focusReviewDashboard
+				m.statusMsg = fmt.Sprintf("Review: %s • j/k nav • a approve • x reject • d defer • ? help", selectedItem.Title)
+				m.statusIsError = false
+				return m
+			}
+
+			// Normal selection - open lens dashboard
+			m.showLensDashboard = true
+			m.focused = focusLensDashboard
+
 			// Initialize lens dashboard with selected label/epic/bead
-			m.lensDashboard = NewLensDashboardModel(selectedItem.Value, m.issues, issueMap, m.theme)
+			switch selectedItem.Type {
+			case "epic":
+				m.lensDashboard = NewEpicLensModel(selectedItem.Value, selectedItem.Title, m.issues, issueMap, m.theme)
+			case "bead":
+				m.lensDashboard = NewBeadLensModel(selectedItem.Value, m.issues, issueMap, m.theme)
+			default: // "label"
+				m.lensDashboard = NewLensDashboardModel(selectedItem.Value, m.issues, issueMap, m.theme)
+			}
 			m.lensDashboard.SetSize(m.width, m.height-1)
 			m.statusMsg = fmt.Sprintf("Lens: %s • j/k nav • w workstreams • d depth • c centered", selectedItem.Title)
 			m.statusIsError = false
@@ -2701,7 +2771,13 @@ func (m Model) handleLensSelectorKeys(msg tea.KeyMsg) Model {
 	// Check if cancelled
 	if m.lensSelector.IsCancelled() {
 		m.showLensSelector = false
+		// Restore split view state based on current width
+		m.isSplitView = m.width > SplitViewThreshold
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 		m.statusMsg = ""
 		return m
 	}
@@ -2711,7 +2787,13 @@ func (m Model) handleLensSelectorKeys(msg tea.KeyMsg) Model {
 		// Handle escape to close
 		if msg.String() == "esc" || msg.String() == "q" {
 			m.showLensSelector = false
+			// Restore split view state based on current width
+			m.isSplitView = m.width > SplitViewThreshold
 			m.focused = focusList
+			if m.isSplitView {
+				m.focused = focusDetail
+			}
+			m.updateViewportContent()
 			m.statusMsg = ""
 		}
 	}
@@ -2732,51 +2814,202 @@ func (m Model) handleLensDashboardKeys(msg tea.KeyMsg) Model {
 		}
 		m.statusIsError = false
 	case "j", "down":
-		m.lensDashboard.MoveDown()
+		if m.lensDashboard.IsDetailFocused() {
+			m.lensDashboard.ScrollDetailDown()
+		} else {
+			m.lensDashboard.MoveDown()
+		}
 	case "k", "up":
-		m.lensDashboard.MoveUp()
+		if m.lensDashboard.IsDetailFocused() {
+			m.lensDashboard.ScrollDetailUp()
+		} else {
+			m.lensDashboard.MoveUp()
+		}
 	case "g":
-		m.lensDashboard.GoToTop()
+		// Toggle grouped view (enter if not in grouped, exit if already in grouped)
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.ExitGroupedView()
+			m.statusMsg = "Switched to flat view"
+		} else {
+			m.lensDashboard.EnterGroupedView()
+			m.statusMsg = fmt.Sprintf("Grouped view (by %s)", m.lensDashboard.GetGroupByMode())
+		}
+		m.statusIsError = false
 	case "G":
-		m.lensDashboard.GoToBottom()
+		// Cycle group-by mode when in grouped view
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.CycleGroupByMode()
+			m.statusMsg = fmt.Sprintf("Grouping by %s", m.lensDashboard.GetGroupByMode())
+			m.statusIsError = false
+		}
+	case "u":
+		// Go to top
+		m.lensDashboard.GoToTop()
 	case "ctrl+d":
-		m.lensDashboard.PageDown()
+		if m.lensDashboard.IsDetailFocused() {
+			m.lensDashboard.ScrollDetailPageDown()
+		} else {
+			m.lensDashboard.PageDown()
+		}
 	case "ctrl+u":
-		m.lensDashboard.PageUp()
-	case "d":
+		if m.lensDashboard.IsDetailFocused() {
+			m.lensDashboard.ScrollDetailPageUp()
+		} else {
+			m.lensDashboard.PageUp()
+		}
+	case "n":
+		// Next section/workstream/group
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.NextGroup()
+			m.statusMsg = fmt.Sprintf("Group: %s", m.lensDashboard.CurrentGroupName())
+		} else if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.NextWorkstream()
+			m.statusMsg = fmt.Sprintf("Workstream: %s", m.lensDashboard.CurrentWorkstreamName())
+		} else {
+			m.lensDashboard.NextSection()
+		}
+		m.statusIsError = false
+	case "N":
+		// Previous section/workstream/group
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.PrevGroup()
+			m.statusMsg = fmt.Sprintf("Group: %s", m.lensDashboard.CurrentGroupName())
+		} else if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.PrevWorkstream()
+			m.statusMsg = fmt.Sprintf("Workstream: %s", m.lensDashboard.CurrentWorkstreamName())
+		} else {
+			m.lensDashboard.PrevSection()
+		}
+		m.statusIsError = false
+	case "t":
+		// Cycle depth (was 'd')
 		m.lensDashboard.CycleDepth()
+		// In workstream/grouped view: ensure current section is expanded after depth change
+		if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.ExpandWorkstream()
+		} else if m.lensDashboard.IsGroupedView() {
+			// Expand current group (only expand, don't toggle)
+			m.lensDashboard.ExpandGroup()
+		}
 		m.statusMsg = fmt.Sprintf("Depth: %v", m.lensDashboard.GetDepth())
 		m.statusIsError = false
-	case "c":
-		m.lensDashboard.ToggleCenteredMode()
-		if m.lensDashboard.IsCenteredMode() {
-			m.statusMsg = "Ego-centered mode enabled"
-		} else {
-			m.statusMsg = "Ego-centered mode disabled"
+	case "T":
+		// Toggle tree view within workstreams or grouped view
+		if m.lensDashboard.IsWorkstreamView() {
+			// Expand workstream if closed before toggling tree view
+			m.lensDashboard.ExpandWorkstream()
+			m.lensDashboard.ToggleWSTreeView()
+			if m.lensDashboard.IsWSTreeView() {
+				m.statusMsg = "Tree view enabled"
+			} else {
+				m.statusMsg = "Tree view disabled"
+			}
+			m.statusIsError = false
+		} else if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.ToggleGroupedTreeView()
+			if m.lensDashboard.IsGroupedTreeView() {
+				m.statusMsg = "Tree view enabled"
+			} else {
+				m.statusMsg = "Tree view disabled"
+			}
+			m.statusIsError = false
+		}
+	case "d":
+		// Go to bottom (was 'G')
+		m.lensDashboard.GoToBottom()
+	case "tab":
+		// Toggle focus between tree and detail panels in split view
+		if m.lensDashboard.IsSplitView() {
+			m.lensDashboard.ToggleDetailFocus()
+			if m.lensDashboard.IsDetailFocused() {
+				m.statusMsg = "Detail panel focused (j/k to scroll)"
+			} else {
+				m.statusMsg = "Tree panel focused"
+			}
+			m.statusIsError = false
+		}
+	case "z":
+		// Expand all groups/workstreams
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.ExpandAllGroups()
+			m.statusMsg = "Expanded all groups"
+		} else if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.ExpandAllWorkstreams()
+			m.statusMsg = "Expanded all workstreams"
+		}
+		m.statusIsError = false
+	case "Z":
+		// Collapse all groups/workstreams
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.CollapseAllGroups()
+			m.statusMsg = "Collapsed all groups"
+		} else if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.CollapseAllWorkstreams()
+			m.statusMsg = "Collapsed all workstreams"
 		}
 		m.statusIsError = false
 	case "esc", "q":
 		m.showLensDashboard = false
+		// Restore split view state based on current width
+		m.isSplitView = m.width > SplitViewThreshold
 		m.focused = focusList
-	case "enter":
-		// Select issue and jump to detail view
-		selectedID := m.lensDashboard.SelectedIssueID()
-		if selectedID != "" {
-			for i, item := range m.list.Items() {
-				if issueItem, ok := item.(IssueItem); ok && issueItem.Issue.ID == selectedID {
-					m.list.Select(i)
-					break
-				}
-			}
-			m.showLensDashboard = false
-			m.focused = focusList
-			if m.isSplitView {
-				m.focused = focusDetail
-			} else {
-				m.showDetails = true
-			}
-			m.updateViewportContent()
+		if m.isSplitView {
+			m.focused = focusDetail
 		}
+		m.updateViewportContent()
+	case "enter":
+		// In workstream view: toggle expand/collapse of current workstream
+		// In grouped view: toggle expand/collapse of current group
+		// In flat view: do nothing (enter is a no-op)
+		if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.ToggleWorkstreamExpand()
+			if m.lensDashboard.IsWorkstreamExpanded(m.lensDashboard.GetWsCursor()) {
+				m.statusMsg = fmt.Sprintf("Expanded: %s", m.lensDashboard.CurrentWorkstreamName())
+			} else {
+				m.statusMsg = fmt.Sprintf("Collapsed: %s", m.lensDashboard.CurrentWorkstreamName())
+			}
+			m.statusIsError = false
+		} else if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.ToggleGroupedExpand()
+			if m.lensDashboard.IsGroupExpanded(m.lensDashboard.GetGroupedCursor()) {
+				m.statusMsg = fmt.Sprintf("Expanded: %s", m.lensDashboard.CurrentGroupName())
+			} else {
+				m.statusMsg = fmt.Sprintf("Collapsed: %s", m.lensDashboard.CurrentGroupName())
+			}
+			m.statusIsError = false
+		}
+		// In flat view, do nothing
+	}
+	return m
+}
+
+// handleReviewDashboardKeys handles keyboard input when review dashboard is focused
+func (m Model) handleReviewDashboardKeys(msg tea.KeyMsg) Model {
+	if m.reviewDashboard == nil {
+		return m
+	}
+
+	// If a modal is active, let the review dashboard handle esc/q to close the modal
+	if m.reviewDashboard.HasActiveModal() {
+		m.reviewDashboard, _ = m.reviewDashboard.Update(msg)
+		return m
+	}
+
+	switch msg.String() {
+	case "esc", "q":
+		// Close review dashboard
+		m.showReviewDashboard = false
+		m.reviewDashboard = nil
+		// Restore split view state based on current width
+		m.isSplitView = m.width > SplitViewThreshold
+		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
+	default:
+		// Pass all other keys to the review dashboard
+		m.reviewDashboard, _ = m.reviewDashboard.Update(msg)
 	}
 	return m
 }
@@ -3046,7 +3279,13 @@ func (m Model) handleHistoryKeys(msg tea.KeyMsg) Model {
 	case "h", "esc":
 		// Exit history view
 		m.isHistoryView = false
+		// Restore split view state based on current width
+		m.isSplitView = m.width > SplitViewThreshold
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 	}
 	return m
 }
@@ -3128,7 +3367,12 @@ func (m Model) handleFlowMatrixKeys(msg tea.KeyMsg) Model {
 			return m
 		}
 		// Close flow matrix view
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 	case "j", "down":
 		m.flowMatrix.MoveDown()
 	case "k", "up":
@@ -3175,7 +3419,12 @@ func (m Model) handleRecipePickerKeys(msg tea.KeyMsg) Model {
 		m.recipePicker.MoveUp()
 	case "esc":
 		m.showRecipePicker = false
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 	case "enter":
 		// Apply selected recipe
 		if selected := m.recipePicker.SelectedRecipe(); selected != nil {
@@ -3183,7 +3432,12 @@ func (m Model) handleRecipePickerKeys(msg tea.KeyMsg) Model {
 			m.applyRecipe(selected)
 		}
 		m.showRecipePicker = false
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 	}
 	return m
 }
@@ -3201,7 +3455,12 @@ func (m Model) handleRepoPickerKeys(msg tea.KeyMsg) Model {
 		m.repoPicker.SelectAll()
 	case "esc", "q":
 		m.showRepoPicker = false
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 	case "enter":
 		selected := m.repoPicker.SelectedRepos()
 
@@ -3223,7 +3482,12 @@ func (m Model) handleRepoPickerKeys(msg tea.KeyMsg) Model {
 		}
 
 		m.showRepoPicker = false
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 	}
 	return m
 }
@@ -3233,7 +3497,12 @@ func (m Model) handleLabelPickerKeys(msg tea.KeyMsg) Model {
 	switch msg.String() {
 	case "esc":
 		m.showLabelPicker = false
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 	case "j", "down", "ctrl+n":
 		m.labelPicker.MoveDown()
 	case "k", "up", "ctrl+p":
@@ -3246,7 +3515,12 @@ func (m Model) handleLabelPickerKeys(msg tea.KeyMsg) Model {
 			m.statusIsError = false
 		}
 		m.showLabelPicker = false
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 	default:
 		// Pass other keys to text input for fuzzy search
 		m.labelPicker.UpdateInput(msg)
@@ -3258,7 +3532,13 @@ func (m Model) handleLabelPickerKeys(msg tea.KeyMsg) Model {
 func (m Model) handleInsightsKeys(msg tea.KeyMsg) Model {
 	switch msg.String() {
 	case "esc":
+		// Restore split view state based on current width
+		m.isSplitView = m.width > SplitViewThreshold
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 	case "j", "down":
 		m.insightsPanel.MoveDown()
 	case "k", "up":
@@ -3407,13 +3687,22 @@ func (m Model) handleTimeTravelInputKeys(msg tea.KeyMsg) Model {
 		}
 		m.showTimeTravelPrompt = false
 		m.timeTravelInput.Blur()
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
 		m.enterTimeTravelMode(revision)
 	case "esc":
 		// Cancel
 		m.showTimeTravelPrompt = false
 		m.timeTravelInput.Blur()
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
 	default:
 		// Update the textinput
 		m.timeTravelInput, _ = m.timeTravelInput.Update(msg)
@@ -3446,7 +3735,11 @@ func (m Model) handleHelpKeys(msg tea.KeyMsg) Model {
 		// Close help overlay
 		m.showHelp = false
 		m.helpScroll = 0
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
 	case " ": // Space opens interactive tutorial (bv-0trk, bv-8y31)
 		m.showHelp = false
 		m.helpScroll = 0
@@ -3457,7 +3750,11 @@ func (m Model) handleHelpKeys(msg tea.KeyMsg) Model {
 		// Any other key dismisses help
 		m.showHelp = false
 		m.helpScroll = 0
+		// Restore focus based on split view state
 		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
 	}
 	return m
 }
@@ -3517,17 +3814,25 @@ func (m Model) View() string {
 		body = m.historyView.View()
 	} else if m.isSprintView {
 		body = m.sprintViewText
-	} else if m.isSplitView {
-		body = m.renderSplitView()
-	} else if m.focused == focusLabelDashboard {
-		m.labelDashboard.SetSize(m.width, m.height-1)
-		body = m.labelDashboard.View()
 	} else if m.focused == focusLensSelector || m.showLensSelector {
+		// Lens selector takes priority over split view (it's a modal overlay)
 		m.lensSelector.SetSize(m.width, m.height-1)
 		body = m.lensSelector.View()
 	} else if m.focused == focusLensDashboard || m.showLensDashboard {
+		// Lens dashboard takes priority over split view (it's a full-screen view)
 		m.lensDashboard.SetSize(m.width, m.height-1)
 		body = m.lensDashboard.View()
+	} else if m.focused == focusReviewDashboard || m.showReviewDashboard {
+		// Review dashboard takes priority over split view
+		if m.reviewDashboard != nil {
+			m.reviewDashboard.SetSize(m.width, m.height-1)
+			body = m.reviewDashboard.View()
+		}
+	} else if m.focused == focusLabelDashboard {
+		m.labelDashboard.SetSize(m.width, m.height-1)
+		body = m.labelDashboard.View()
+	} else if m.isSplitView {
+		body = m.renderSplitView()
 	} else {
 		// Mobile view
 		if m.showDetails {

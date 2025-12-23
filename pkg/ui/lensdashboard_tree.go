@@ -505,8 +505,8 @@ func (m *LensDashboardModel) buildTree() {
 	m.blockedCount = 0
 	m.closedCount = 0
 
-	// For epic/bead modes with centered view, use ego-centered tree building
-	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.epicID != "" {
+	// For epic/bead modes, use ego-centered tree building
+	if (m.viewMode == "epic" || m.viewMode == "bead") && m.epicID != "" {
 		m.buildEgoCenteredTree()
 		return
 	}

@@ -61,12 +61,10 @@ func (m *LensDashboardModel) View() string {
 
 	// Stats line
 	statsStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
-	primaryIcon := t.Renderer.NewStyle().Foreground(t.Primary).Render("●")
-	contextIcon := t.Renderer.NewStyle().Foreground(t.Secondary).Render("○")
 	depthStyle := t.Renderer.NewStyle().Foreground(t.InProgress).Bold(true)
 
-	statsLine := fmt.Sprintf("%s %d in lens  %s %d context  Depth: [%s]",
-		primaryIcon, m.primaryCount, contextIcon, m.contextCount,
+	statsLine := fmt.Sprintf("%d in lens  %d context  Depth: [%s]",
+		m.primaryCount, m.contextCount,
 		depthStyle.Render(m.dependencyDepth.String()))
 	lines = append(lines, statsStyle.Render(statsLine))
 
@@ -146,7 +144,7 @@ func (m *LensDashboardModel) View() string {
 	} else if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		// Render workstream view
 		contentLines = m.renderWorkstreamView(contentWidth, visibleLines, statsStyle)
-	} else if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+	} else if (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
 		// Render ego-centered view for epic/bead modes
 		contentLines = m.renderCenteredView(contentWidth, visibleLines, statsStyle)
 	} else {
@@ -174,12 +172,8 @@ func (m *LensDashboardModel) View() string {
 	navHint := "n/N: section"
 	enterHint := "enter: focus"
 	treeHint := ""
-	centeredHint := ""
-	if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") {
+	if m.viewMode == "epic" || m.viewMode == "bead" {
 		viewIndicator = "[centered]"
-		centeredHint = " • c: flat"
-	} else if m.viewMode == "epic" || m.viewMode == "bead" {
-		centeredHint = " • c: centered"
 	}
 	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		viewIndicator = fmt.Sprintf("[%d streams]", m.workstreamCount)
@@ -193,7 +187,7 @@ func (m *LensDashboardModel) View() string {
 		}
 	}
 
-	lines = append(lines, footerStyle.Render(fmt.Sprintf("%s • j/k: nav • g/G: top/bottom • %s • %s • %s%s%s • esc: back", viewIndicator, toggleHint, navHint, enterHint, treeHint, centeredHint)))
+	lines = append(lines, footerStyle.Render(fmt.Sprintf("%s • j/k: nav • g/G: top/bottom • %s • %s • %s%s • esc: back", viewIndicator, toggleHint, navHint, enterHint, treeHint)))
 
 	return strings.Join(lines, "\n")
 }
@@ -388,15 +382,12 @@ func (m *LensDashboardModel) renderEgoNodeLine(fn LensFlatNode, isSelected bool,
 		selectPrefix = "▸ "
 	}
 
-	// Diamond icon for center - elegant ◈ instead of filled ◆
-	indicator := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true).Render("◈")
-
 	// Issue ID and title with prominent styling
 	idStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
 	titleStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
 
-	// Calculate max title length (more room without badge)
-	prefixLen := len(selectPrefix) + 2 + len(node.Issue.ID) + 3
+	// Calculate max title length
+	prefixLen := len(selectPrefix) + len(node.Issue.ID) + 2
 	maxTitleLen := maxWidth - prefixLen
 	if maxTitleLen < 15 {
 		maxTitleLen = 15
@@ -414,9 +405,8 @@ func (m *LensDashboardModel) renderEgoNodeLine(fn LensFlatNode, isSelected bool,
 		statusSuffix = blockerStyle.Render(" ◄ " + blockerText)
 	}
 
-	return fmt.Sprintf("%s%s %s %s%s",
+	return fmt.Sprintf("%s%s %s%s",
 		selectPrefix,
-		indicator,
 		idStyle.Render(node.Issue.ID),
 		titleStyle.Render(title),
 		statusSuffix)
@@ -431,17 +421,6 @@ func (m *LensDashboardModel) renderCenteredNode(fn LensFlatNode, isSelected bool
 	selectPrefix := "  "
 	if isSelected {
 		selectPrefix = "▸ "
-	}
-
-	// Primary/context indicator - use smaller ▴ for upstream blockers
-	var indicator string
-	if node.IsUpstream {
-		// Upstream blocker - use smaller up triangle
-		indicator = t.Renderer.NewStyle().Foreground(t.Blocked).Render("▴")
-	} else if node.IsPrimary {
-		indicator = t.Renderer.NewStyle().Foreground(t.Primary).Render("●")
-	} else {
-		indicator = t.Renderer.NewStyle().Foreground(t.Secondary).Render("○")
 	}
 
 	// Tree prefix (styled dimmer)
@@ -489,8 +468,8 @@ func (m *LensDashboardModel) renderCenteredNode(fn LensFlatNode, isSelected bool
 		titleStyle = titleStyle.Foreground(t.Base.GetForeground())
 	}
 
-	// Calculate max title length (no depth badge = more room for title)
-	prefixLen := len(selectPrefix) + 2 + len(fn.TreePrefix) + len(node.Issue.ID) + 3
+	// Calculate max title length
+	prefixLen := len(selectPrefix) + len(fn.TreePrefix) + len(node.Issue.ID) + 2
 	maxTitleLen := maxWidth - prefixLen
 	if maxTitleLen < 15 {
 		maxTitleLen = 15
@@ -508,9 +487,8 @@ func (m *LensDashboardModel) renderCenteredNode(fn LensFlatNode, isSelected bool
 		statusSuffix = blockerStyle.Render(" ◄ " + blockerText)
 	}
 
-	return fmt.Sprintf("%s%s %s%s %s%s",
+	return fmt.Sprintf("%s%s%s %s%s",
 		selectPrefix,
-		indicator,
 		treePrefix,
 		idStyle.Render(node.Issue.ID),
 		titleStyle.Render(title),
@@ -1132,17 +1110,6 @@ func (m *LensDashboardModel) renderTreeNode(fn LensFlatNode, isSelected bool, ma
 		selectPrefix = "▸ "
 	}
 
-	// Primary/context/entry-epic indicator
-	var indicator string
-	if node.IsEntryEpic {
-		// Entry epic gets a distinct diamond icon
-		indicator = t.Renderer.NewStyle().Foreground(t.Primary).Bold(true).Render("◆")
-	} else if node.IsPrimary {
-		indicator = t.Renderer.NewStyle().Foreground(t.Primary).Render("●")
-	} else {
-		indicator = t.Renderer.NewStyle().Foreground(t.Secondary).Render("○")
-	}
-
 	// Tree prefix (styled dimmer)
 	treePrefix := ""
 	if fn.TreePrefix != "" {
@@ -1168,8 +1135,8 @@ func (m *LensDashboardModel) renderTreeNode(fn LensFlatNode, isSelected bool, ma
 		titleStyle = titleStyle.Foreground(t.Base.GetForeground())
 	}
 
-	// Calculate max title length
-	prefixLen := len(selectPrefix) + 2 + len(fn.TreePrefix) + len(node.Issue.ID) + 3
+	// Calculate max title length (removed bullet indicator, so less prefix)
+	prefixLen := len(selectPrefix) + len(fn.TreePrefix) + len(node.Issue.ID) + 2
 	maxTitleLen := maxWidth - prefixLen
 	if maxTitleLen < 15 {
 		maxTitleLen = 15
@@ -1193,9 +1160,8 @@ func (m *LensDashboardModel) renderTreeNode(fn LensFlatNode, isSelected bool, ma
 		statusSuffix = blockerStyle.Render(" ◄ " + blockerText)
 	}
 
-	return fmt.Sprintf("%s%s %s%s %s%s%s",
+	return fmt.Sprintf("%s%s%s %s%s%s",
 		selectPrefix,
-		indicator,
 		treePrefix,
 		idStyle.Render(node.Issue.ID),
 		titleStyle.Render(title),
@@ -1659,12 +1625,10 @@ func (m *LensDashboardModel) renderTreeContent(contentWidth int) string {
 	statsStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
 
 	// Stats line
-	primaryIcon := t.Renderer.NewStyle().Foreground(t.Primary).Render("●")
-	contextIcon := t.Renderer.NewStyle().Foreground(t.Secondary).Render("○")
 	depthStyle := t.Renderer.NewStyle().Foreground(t.InProgress).Bold(true)
 
-	statsLine := fmt.Sprintf("%s %d  %s %d  [%s]",
-		primaryIcon, m.primaryCount, contextIcon, m.contextCount,
+	statsLine := fmt.Sprintf("%d in lens  %d context  [%s]",
+		m.primaryCount, m.contextCount,
 		depthStyle.Render(m.dependencyDepth.String()))
 	lines = append(lines, statsStyle.Render(statsLine))
 
@@ -1688,7 +1652,7 @@ func (m *LensDashboardModel) renderTreeContent(contentWidth int) string {
 		lines = append(lines, m.renderGroupedView(contentWidth, visibleLines, statsStyle)...)
 	} else if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
 		lines = append(lines, m.renderWorkstreamView(contentWidth, visibleLines, statsStyle)...)
-	} else if m.centeredMode && (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
+	} else if (m.viewMode == "epic" || m.viewMode == "bead") && m.egoNode != nil {
 		lines = append(lines, m.renderCenteredView(contentWidth, visibleLines, statsStyle)...)
 	} else {
 		// Render flat tree view (reuse the main render function)

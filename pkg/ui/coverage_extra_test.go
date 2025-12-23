@@ -518,8 +518,9 @@ func TestBoardAndInsightsExtraKeys(t *testing.T) {
 	m = m.handleInsightsKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
 	m = m.handleInsightsKeys(tea.KeyMsg{Type: tea.KeyTab})
 	m = m.handleInsightsKeys(tea.KeyMsg{Type: tea.KeyEsc})
-	if m.focused != focusList {
-		t.Fatalf("Esc should return focus to list")
+	// With width=120 > SplitViewThreshold, Esc returns focus to detail pane (split view behavior)
+	if m.focused != focusDetail {
+		t.Fatalf("Esc should return focus to detail in split view (width=%d)", m.width)
 	}
 
 	// Time-travel input enter path (will fail gracefully without git)
