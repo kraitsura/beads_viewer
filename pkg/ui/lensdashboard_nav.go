@@ -421,21 +421,24 @@ func (m *LensDashboardModel) ensureGroupedVisible() {
 	// Calculate visible lines using viewport config
 	// renderGroupedView adds 2 lines for header, rest is content
 	vp := m.calculateViewport()
-	visibleLines := vp.ContentHeight - 2
-	if visibleLines < 5 {
-		visibleLines = 5
+	contentLines := vp.ContentHeight - 2
+	if contentLines < 5 {
+		contentLines = 5
 	}
 
-	// Center cursor in viewport (scrolloff = half viewport height)
-	scrolloff := visibleLines / 2
+	// Center cursor in viewport with reduced scrolloff (1/4 viewport instead of 1/2)
+	scrolloff := contentLines / 4
 	targetScroll := linePos - scrolloff
 	if targetScroll < 0 {
 		targetScroll = 0
 	}
 
-	// NOTE: We intentionally do NOT clamp to maxScroll here.
-	// This allows the last items to be centered with empty space below them.
-	// The render function handles padding when scroll goes past content.
+	// Clamp to max scroll to keep cursor visible within viewport
+	totalLines := m.getTotalGroupedLines()
+	maxScroll := totalLines - contentLines + scrolloff
+	if maxScroll > 0 && targetScroll > maxScroll {
+		targetScroll = maxScroll
+	}
 
 	m.groupedScroll = targetScroll
 }
@@ -494,21 +497,24 @@ func (m *LensDashboardModel) ensureVisibleWS() {
 	// Calculate visible lines using viewport config
 	// renderWorkstreamView adds 2 lines for header, rest is content
 	vp := m.calculateViewport()
-	visibleLines := vp.ContentHeight - 2
-	if visibleLines < 3 {
-		visibleLines = 3
+	contentLines := vp.ContentHeight - 2
+	if contentLines < 3 {
+		contentLines = 3
 	}
 
-	// Center cursor in viewport (scrolloff = half viewport height)
-	scrolloff := visibleLines / 2
+	// Center cursor in viewport with reduced scrolloff (1/4 viewport instead of 1/2)
+	scrolloff := contentLines / 4
 	targetScroll := cursorLine - scrolloff
 	if targetScroll < 0 {
 		targetScroll = 0
 	}
 
-	// NOTE: We intentionally do NOT clamp to maxScroll here.
-	// This allows the last items to be centered with empty space below them.
-	// The render function handles padding when scroll goes past content.
+	// Clamp to max scroll to keep cursor visible within viewport
+	totalLines := m.getTotalWSLines()
+	maxScroll := totalLines - contentLines + scrolloff
+	if maxScroll > 0 && targetScroll > maxScroll {
+		targetScroll = maxScroll
+	}
 
 	m.wsScroll = targetScroll
 }
@@ -635,24 +641,28 @@ func (m *LensDashboardModel) ensureVisible() {
 	}
 
 	vp := m.calculateViewport()
-	visibleLines := vp.ContentHeight
-	if visibleLines < 5 {
-		visibleLines = 5
+	// Use contentLines to match renderFlatView offset (subtracts 2 for header)
+	contentLines := vp.ContentHeight - 2
+	if contentLines < 5 {
+		contentLines = 5
 	}
 
 	// Get line position of cursor (accounting for status headers)
 	cursorLine := m.getFlatLinePosition(m.cursor)
 
-	// Center cursor in viewport (scrolloff = half viewport height)
-	scrolloff := visibleLines / 2
+	// Center cursor in viewport with reduced scrolloff (1/4 viewport instead of 1/2)
+	scrolloff := contentLines / 4
 	targetScrollLine := cursorLine - scrolloff
 	if targetScrollLine < 0 {
 		targetScrollLine = 0
 	}
 
-	// NOTE: We intentionally do NOT clamp to maxScrollLine here.
-	// This allows the last items to be centered with empty space below them.
-	// The render function handles padding when scroll goes past content.
+	// Clamp to max scroll to keep cursor visible within viewport
+	totalLines := m.getTotalFlatLines()
+	maxScroll := totalLines - contentLines + scrolloff
+	if maxScroll > 0 && targetScrollLine > maxScroll {
+		targetScrollLine = maxScroll
+	}
 
 	m.scroll = targetScrollLine
 }
@@ -685,18 +695,26 @@ func (m *LensDashboardModel) ensureCenteredVisible() {
 	}
 
 	vp := m.calculateViewport()
-	visibleLines := vp.ContentHeight
+	// Use contentLines to match renderCenteredView offset (subtracts 2)
+	contentLines := vp.ContentHeight - 2
+	if contentLines < 5 {
+		contentLines = 5
+	}
 
-	// Center cursor in viewport (scrolloff = half viewport height)
-	scrolloff := visibleLines / 2
+	// Center cursor in viewport with reduced scrolloff (1/4 viewport instead of 1/2)
+	scrolloff := contentLines / 4
 	targetScroll := m.cursor - scrolloff
 	if targetScroll < 0 {
 		targetScroll = 0
 	}
 
-	// NOTE: We intentionally do NOT clamp to maxScroll here.
-	// This allows the last items to be centered with empty space below them.
-	// The render function handles padding when scroll goes past content.
+	// Clamp to max scroll to keep cursor visible within viewport
+	// Total navigable items: upstream nodes + ego node + downstream nodes
+	totalItems := len(m.upstreamNodes) + 1 + len(m.flatNodes)
+	maxScroll := totalItems - contentLines + scrolloff
+	if maxScroll > 0 && targetScroll > maxScroll {
+		targetScroll = maxScroll
+	}
 
 	m.scroll = targetScroll
 }
