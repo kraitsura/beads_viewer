@@ -84,7 +84,7 @@ func (m *LensDashboardModel) computeBlockingTopoRanks(issueIDs map[string]bool) 
 	return ranks
 }
 
-// sortByStatusThenTopoThenPriority sorts issues by: status order, then topological rank, then priority.
+// sortByStatusThenTopoThenPriority sorts issues by: status order, then topological rank, then priority, then hierarchical ID.
 // This ensures blockers appear before blocked issues within the same status level.
 func (m *LensDashboardModel) sortByStatusThenTopoThenPriority(issues []model.Issue, topoRanks map[string]int) {
 	sort.Slice(issues, func(i, j int) bool {
@@ -103,7 +103,12 @@ func (m *LensDashboardModel) sortByStatusThenTopoThenPriority(issues []model.Iss
 		}
 
 		// Third: within same topo rank, sort by priority
-		return issues[i].Priority < issues[j].Priority
+		if issues[i].Priority != issues[j].Priority {
+			return issues[i].Priority < issues[j].Priority
+		}
+
+		// Fourth: within same priority, sort by hierarchical ID (ascending)
+		return CompareHierarchicalIDs(issues[i].ID, issues[j].ID) < 0
 	})
 }
 
@@ -583,7 +588,7 @@ func (m *LensDashboardModel) buildTree() {
 		}
 	}
 
-	// Sort roots: entry point first (when in epic or bead mode), then by status, topo rank, priority
+	// Sort roots: entry point first (when in epic or bead mode), then by status, topo rank, priority, hierarchical ID
 	sort.Slice(rootIssues, func(i, j int) bool {
 		// Entry point (epic or bead) always comes first
 		if (m.viewMode == "epic" || m.viewMode == "bead") && m.epicID != "" {
@@ -594,7 +599,7 @@ func (m *LensDashboardModel) buildTree() {
 				return false
 			}
 		}
-		// Sort by status, then topological rank, then priority
+		// Sort by status, then topological rank, then priority, then hierarchical ID
 		si := m.getStatusOrder(rootIssues[i])
 		sj := m.getStatusOrder(rootIssues[j])
 		if si != sj {
@@ -606,7 +611,12 @@ func (m *LensDashboardModel) buildTree() {
 		if ri != rj {
 			return ri < rj
 		}
-		return rootIssues[i].Priority < rootIssues[j].Priority
+		// Within same topo rank, sort by priority
+		if rootIssues[i].Priority != rootIssues[j].Priority {
+			return rootIssues[i].Priority < rootIssues[j].Priority
+		}
+		// Within same priority, sort by hierarchical ID (ascending)
+		return CompareHierarchicalIDs(rootIssues[i].ID, rootIssues[j].ID) < 0
 	})
 
 	// Build tree from each root
@@ -706,7 +716,7 @@ func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth in
 			}
 		}
 
-		// Sort children by status, then topological rank, then priority
+		// Sort children by status, then topological rank, then priority, then hierarchical ID
 		sort.Slice(childIssues, func(i, j int) bool {
 			si := m.getStatusOrder(childIssues[i])
 			sj := m.getStatusOrder(childIssues[j])
@@ -719,7 +729,12 @@ func (m *LensDashboardModel) buildTreeNode(issue model.Issue, depth, maxDepth in
 			if ri != rj {
 				return ri < rj
 			}
-			return childIssues[i].Priority < childIssues[j].Priority
+			// Within same topo rank, sort by priority
+			if childIssues[i].Priority != childIssues[j].Priority {
+				return childIssues[i].Priority < childIssues[j].Priority
+			}
+			// Within same priority, sort by hierarchical ID (ascending)
+			return CompareHierarchicalIDs(childIssues[i].ID, childIssues[j].ID) < 0
 		})
 
 		newParentPath := append(parentPath, isLast)
@@ -796,7 +811,7 @@ func (m *LensDashboardModel) addUpstreamContextBlockers(seen map[string]bool, ma
 		return
 	}
 
-	// Sort by status, then topological rank, then priority
+	// Sort by status, then topological rank, then priority, then hierarchical ID
 	sort.Slice(contextBlockers, func(i, j int) bool {
 		si := m.getStatusOrder(contextBlockers[i])
 		sj := m.getStatusOrder(contextBlockers[j])
@@ -809,7 +824,12 @@ func (m *LensDashboardModel) addUpstreamContextBlockers(seen map[string]bool, ma
 		if ri != rj {
 			return ri < rj
 		}
-		return contextBlockers[i].Priority < contextBlockers[j].Priority
+		// Within same topo rank, sort by priority
+		if contextBlockers[i].Priority != contextBlockers[j].Priority {
+			return contextBlockers[i].Priority < contextBlockers[j].Priority
+		}
+		// Within same priority, sort by hierarchical ID (ascending)
+		return CompareHierarchicalIDs(contextBlockers[i].ID, contextBlockers[j].ID) < 0
 	})
 
 	// Find context blockers that are "roots" (not blocked by other unseen context blockers)
@@ -920,7 +940,7 @@ func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, m
 			}
 		}
 
-		// Sort children by status, then topological rank, then priority
+		// Sort children by status, then topological rank, then priority, then hierarchical ID
 		sort.Slice(childIssues, func(i, j int) bool {
 			si := m.getStatusOrder(childIssues[i])
 			sj := m.getStatusOrder(childIssues[j])
@@ -933,7 +953,12 @@ func (m *LensDashboardModel) buildContextBlockerNode(issue model.Issue, depth, m
 			if ri != rj {
 				return ri < rj
 			}
-			return childIssues[i].Priority < childIssues[j].Priority
+			// Within same topo rank, sort by priority
+			if childIssues[i].Priority != childIssues[j].Priority {
+				return childIssues[i].Priority < childIssues[j].Priority
+			}
+			// Within same priority, sort by hierarchical ID (ascending)
+			return CompareHierarchicalIDs(childIssues[i].ID, childIssues[j].ID) < 0
 		})
 
 		newParentPath := append(parentPath, isLast)
@@ -1089,7 +1114,7 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 		}
 	}
 
-	// Sort blockers by status, then topological rank, then priority
+	// Sort blockers by status, then topological rank, then priority, then hierarchical ID
 	sort.Slice(blockerIssues, func(i, j int) bool {
 		si := m.getStatusOrder(blockerIssues[i])
 		sj := m.getStatusOrder(blockerIssues[j])
@@ -1102,7 +1127,12 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 		if ri != rj {
 			return ri < rj
 		}
-		return blockerIssues[i].Priority < blockerIssues[j].Priority
+		// Within same topo rank, sort by priority
+		if blockerIssues[i].Priority != blockerIssues[j].Priority {
+			return blockerIssues[i].Priority < blockerIssues[j].Priority
+		}
+		// Within same priority, sort by hierarchical ID (ascending)
+		return CompareHierarchicalIDs(blockerIssues[i].ID, blockerIssues[j].ID) < 0
 	})
 
 	for i, blocker := range blockerIssues {
@@ -1160,7 +1190,7 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 		}
 	}
 
-	// Sort by status, then topological rank, then priority
+	// Sort by status, then topological rank, then priority, then hierarchical ID
 	sort.Slice(downstreamIssues, func(i, j int) bool {
 		si := m.getStatusOrder(downstreamIssues[i])
 		sj := m.getStatusOrder(downstreamIssues[j])
@@ -1173,7 +1203,12 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 		if ri != rj {
 			return ri < rj
 		}
-		return downstreamIssues[i].Priority < downstreamIssues[j].Priority
+		// Within same topo rank, sort by priority
+		if downstreamIssues[i].Priority != downstreamIssues[j].Priority {
+			return downstreamIssues[i].Priority < downstreamIssues[j].Priority
+		}
+		// Within same priority, sort by hierarchical ID (ascending)
+		return CompareHierarchicalIDs(downstreamIssues[i].ID, downstreamIssues[j].ID) < 0
 	})
 
 	// Build tree from each downstream issue
@@ -1282,7 +1317,7 @@ func (m *LensDashboardModel) buildCenteredTreeNode(issue model.Issue, relDepth, 
 			}
 		}
 
-		// Sort children by status, then topological rank, then priority
+		// Sort children by status, then topological rank, then priority, then hierarchical ID
 		sort.Slice(childIssues, func(i, j int) bool {
 			si := m.getStatusOrder(childIssues[i])
 			sj := m.getStatusOrder(childIssues[j])
@@ -1295,7 +1330,12 @@ func (m *LensDashboardModel) buildCenteredTreeNode(issue model.Issue, relDepth, 
 			if ri != rj {
 				return ri < rj
 			}
-			return childIssues[i].Priority < childIssues[j].Priority
+			// Within same topo rank, sort by priority
+			if childIssues[i].Priority != childIssues[j].Priority {
+				return childIssues[i].Priority < childIssues[j].Priority
+			}
+			// Within same priority, sort by hierarchical ID (ascending)
+			return CompareHierarchicalIDs(childIssues[i].ID, childIssues[j].ID) < 0
 		})
 
 		newParentPath := append(parentPath, isLast)
