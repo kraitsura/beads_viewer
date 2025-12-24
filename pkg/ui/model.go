@@ -175,6 +175,13 @@ type AgentFileCheckMsg struct {
 	FileType     string
 }
 
+// ReviewSaveCompleteMsg is sent when async review save completes
+type ReviewSaveCompleteMsg struct {
+	Saved  int
+	Failed int
+	Errors []error
+}
+
 // CheckAgentFileCmd returns a command that checks if we should prompt for AGENTS.md
 func CheckAgentFileCmd(workDir string) tea.Cmd {
 	return func() tea.Msg {
@@ -1169,6 +1176,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focused = focusAgentPrompt
 		}
 
+	case ReviewSaveCompleteMsg:
+		// Async review save completed
+		if msg.Failed > 0 {
+			m.statusMsg = fmt.Sprintf("Saved %d reviews, %d failed", msg.Saved, msg.Failed)
+			m.statusIsError = true
+		} else if msg.Saved > 0 {
+			m.statusMsg = fmt.Sprintf("Saved %d reviews", msg.Saved)
+			m.statusIsError = false
+		}
+
 	case FileChangedMsg:
 		// File changed on disk - reload issues and recompute analysis
 		if m.beadsPath == "" {
@@ -1638,8 +1655,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.String() == "ctrl+c" {
 				return m, tea.Quit
 			}
-			m = m.handleReviewDashboardKeys(msg)
-			return m, nil
+			var cmd tea.Cmd
+			m, cmd = m.handleReviewDashboardKeys(msg)
+			return m, cmd
 		}
 
 		// Handle quit confirmation first
@@ -3200,9 +3218,9 @@ func (m Model) handleLensDashboardKeys(msg tea.KeyMsg) Model {
 }
 
 // handleReviewDashboardKeys handles keyboard input when review dashboard is focused
-func (m Model) handleReviewDashboardKeys(msg tea.KeyMsg) Model {
+func (m Model) handleReviewDashboardKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if m.reviewDashboard == nil {
-		return m
+		return m, nil
 	}
 
 	// Pass all keys to the review dashboard first
@@ -3210,15 +3228,26 @@ func (m Model) handleReviewDashboardKeys(msg tea.KeyMsg) Model {
 
 	// Check if the review dashboard wants to quit
 	if m.reviewDashboard.IsQuitting() {
-		// Save reviews if the dashboard wants to save
-		if m.reviewDashboard.ShouldSave() {
-			result := m.reviewDashboard.SaveReviews()
-			if result.Failed > 0 {
-				m.statusMsg = fmt.Sprintf("Saved %d reviews, %d failed", result.Saved, result.Failed)
-				m.statusIsError = true
-			} else if result.Saved > 0 {
-				m.statusMsg = fmt.Sprintf("Saved %d reviews", result.Saved)
-				m.statusIsError = false
+		var saveCmd tea.Cmd
+
+		// Save reviews asynchronously if the dashboard wants to save
+		if m.reviewDashboard.ShouldSave() && m.reviewDashboard.PendingSaveCount() > 0 {
+			// Capture dashboard reference for async save
+			dashboard := m.reviewDashboard
+			pendingCount := dashboard.PendingSaveCount()
+
+			// Show immediate feedback
+			m.statusMsg = fmt.Sprintf("Saving %d reviews...", pendingCount)
+			m.statusIsError = false
+
+			// Create async save command
+			saveCmd = func() tea.Msg {
+				result := dashboard.SaveReviews()
+				return ReviewSaveCompleteMsg{
+					Saved:  result.Saved,
+					Failed: result.Failed,
+					Errors: result.Errors,
+				}
 			}
 		}
 
@@ -3249,8 +3278,10 @@ func (m Model) handleReviewDashboardKeys(msg tea.KeyMsg) Model {
 			}
 			m.updateViewportContent()
 		}
+
+		return m, saveCmd
 	}
-	return m
+	return m, nil
 }
 
 // handleHistoryKeys handles keyboard input when history view is focused

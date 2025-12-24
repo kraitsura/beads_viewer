@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,20 +20,35 @@ func NewCommentReviewSaver(workspaceRoot string) *CommentReviewSaver {
 	}
 }
 
-// Save implements ReviewSaver using bd comment command with structured format
+// Save implements ReviewSaver using bd comment command with structured format.
+// Runs saves in parallel for better performance.
 func (s *CommentReviewSaver) Save(actions []ReviewAction) (int, []error) {
+	if len(actions) == 0 {
+		return 0, nil
+	}
+
+	// Run saves in parallel with error collection
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	var errors []error
 	saved := 0
 
 	for _, action := range actions {
-		err := s.saveOne(action)
-		if err != nil {
-			errors = append(errors, fmt.Errorf("%s: %w", action.IssueID, err))
-		} else {
-			saved++
-		}
+		wg.Add(1)
+		go func(a ReviewAction) {
+			defer wg.Done()
+			err := s.saveOne(a)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errors = append(errors, fmt.Errorf("%s: %w", a.IssueID, err))
+			} else {
+				saved++
+			}
+		}(action)
 	}
 
+	wg.Wait()
 	return saved, errors
 }
 

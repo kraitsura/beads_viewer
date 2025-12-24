@@ -832,7 +832,7 @@ func (m *ReviewDashboardModel) renderSummary() string {
 	b.WriteString(keyStyle.Render("P") + hintStyle.Render(" copy AI prompt\n"))
 	b.WriteString(keyStyle.Render("Esc") + hintStyle.Render(" continue reviewing"))
 
-	// Wrap in centered box (same style as LabelTreeReviewModel)
+	// Wrap in centered box
 	boxStyle := t.Renderer.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Primary).
