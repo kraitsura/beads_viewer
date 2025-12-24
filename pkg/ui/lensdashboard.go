@@ -78,8 +78,8 @@ func (s ScopeMode) ShortString() string {
 
 // Viewport constants for consistent layout calculations
 const (
-	lensHeaderMinLines   = 4 // title + stats + summary + blank
-	lensFooterLines      = 2 // blank + keybinds
+	lensHeaderMinLines   = 4 // title + stats + blank + blank
+	lensKeybindBarLines  = 2 // keybind info bar (2 lines: global + mode-specific)
 	lensMinContentHeight = 5
 )
 
@@ -100,14 +100,14 @@ func (m *LensDashboardModel) calculateViewport() ViewportConfig {
 		headerLines += 2
 	}
 
-	contentHeight := m.height - headerLines - lensFooterLines
+	contentHeight := m.height - headerLines - lensKeybindBarLines
 	if contentHeight < lensMinContentHeight {
 		contentHeight = lensMinContentHeight
 	}
 
 	return ViewportConfig{
 		HeaderLines:   headerLines,
-		FooterLines:   lensFooterLines,
+		FooterLines:   lensKeybindBarLines,
 		ContentHeight: contentHeight,
 	}
 }
@@ -267,6 +267,15 @@ type LensDashboardModel struct {
 	// Scope input modal
 	showScopeInput bool   // True when scope input modal is visible
 	scopeInput     string // Current text in scope input
+
+	// Fuzzy search (filters main list in-place)
+	showFuzzySearch     bool           // True when fuzzy search is active
+	fuzzyInput          string         // Current fuzzy search input text
+	preFuzzyFlatNodes   []LensFlatNode // Original flatNodes before search (for restore)
+	preFuzzyCursor      int            // Original cursor position before search
+	preFuzzyScroll      int            // Original scroll position before search
+	preFuzzyUpstream    []LensFlatNode // Original upstream nodes (for centered mode)
+	preFuzzySelectedID  string         // Original selected issue ID
 
 	// Split view (bead detail panel)
 	detailViewport viewport.Model // Viewport for bead details on the right
@@ -508,7 +517,21 @@ func (m *LensDashboardModel) IsCenteredMode() bool {
 // GetPrimaryIDsForDepth returns the appropriate primaryIDs for the current depth.
 // At Depth1, returns only direct label matches.
 // At Depth2+, returns expanded set including descendants.
+// When scope filtering is active, returns the scope-filtered primaryIDs.
 func (m *LensDashboardModel) GetPrimaryIDsForDepth() map[string]bool {
+	// When scope is active, applyScopeFilter has already filtered the IDs
+	if len(m.scopeLabels) > 0 {
+		// For epic/bead modes with scope: use scope-filtered primaryIDs
+		if m.viewMode == "epic" || m.viewMode == "bead" {
+			return m.primaryIDs
+		}
+		// For label mode with scope: respect depth setting
+		if m.dependencyDepth == Depth1 {
+			return m.directPrimaryIDs // scope-filtered direct matches only
+		}
+		return m.primaryIDs // scope-filtered with descendants
+	}
+
 	// Epic and bead modes: use depth-specific descendant maps
 	if (m.viewMode == "epic" || m.viewMode == "bead") && m.epicDescendantsByDepth != nil {
 		if depthSet, ok := m.epicDescendantsByDepth[m.dependencyDepth]; ok {
@@ -567,6 +590,38 @@ func (m *LensDashboardModel) getDisplayIssues() []model.Issue {
 			issues = append(issues, issue)
 		}
 	}
+	return issues
+}
+
+// GetAllDisplayIssues returns all issues currently visible in the lens dashboard.
+// For centered modes (epic/bead), includes upstream blockers, ego node, and downstream.
+// For label mode, returns the same as getDisplayIssues().
+func (m *LensDashboardModel) GetAllDisplayIssues() []model.Issue {
+	seen := make(map[string]bool)
+	issues := make([]model.Issue, 0)
+
+	// Add upstream nodes (for centered mode)
+	for _, fn := range m.upstreamNodes {
+		if !seen[fn.Node.Issue.ID] {
+			seen[fn.Node.Issue.ID] = true
+			issues = append(issues, fn.Node.Issue)
+		}
+	}
+
+	// Add ego node (for centered mode)
+	if m.egoNode != nil && !seen[m.egoNode.Node.Issue.ID] {
+		seen[m.egoNode.Node.Issue.ID] = true
+		issues = append(issues, m.egoNode.Node.Issue)
+	}
+
+	// Add downstream nodes (flatNodes)
+	for _, fn := range m.flatNodes {
+		if !seen[fn.Node.Issue.ID] {
+			seen[fn.Node.Issue.ID] = true
+			issues = append(issues, fn.Node.Issue)
+		}
+	}
+
 	return issues
 }
 

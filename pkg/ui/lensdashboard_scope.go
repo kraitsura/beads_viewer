@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Dicklesworthstone/beads_viewer/pkg/model"
+	"github.com/sahilm/fuzzy"
 )
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -94,8 +95,15 @@ func (m *LensDashboardModel) rebuildWithScope() {
 				}
 			}
 			m.primaryIDs = expandToDescendants(m.directPrimaryIDs, m.allIssues)
+		} else if (m.viewMode == "epic" || m.viewMode == "bead") && m.epicDescendantsByDepth != nil {
+			// Restore original primaryIDs from the DepthAll set
+			if allDescendants, ok := m.epicDescendantsByDepth[DepthAll]; ok {
+				m.primaryIDs = make(map[string]bool)
+				for id := range allDescendants {
+					m.primaryIDs[id] = true
+				}
+			}
 		}
-		// For epic/bead modes, scope doesn't change primary logic (epic children stay)
 	} else {
 		// Apply scope filtering
 		m.applyScopeFilter()
@@ -144,9 +152,21 @@ func (m *LensDashboardModel) applyScopeFilter() {
 		}
 		m.primaryIDs = expandToDescendants(m.directPrimaryIDs, m.allIssues)
 	} else {
-		// For epic/bead modes, filter the existing primaryIDs
+		// For epic/bead modes, filter from the ORIGINAL set (not the already-filtered m.primaryIDs)
+		// Use epicDescendantsByDepth[DepthAll] as the source of truth
+		var originalIDs map[string]bool
+		if m.epicDescendantsByDepth != nil {
+			if allDescendants, ok := m.epicDescendantsByDepth[DepthAll]; ok {
+				originalIDs = allDescendants
+			}
+		}
+		// Fallback to current primaryIDs if no depth map available
+		if originalIDs == nil {
+			originalIDs = m.primaryIDs
+		}
+
 		filteredPrimary := make(map[string]bool)
-		for id := range m.primaryIDs {
+		for id := range originalIDs {
 			if scopeMatchingIDs[id] {
 				filteredPrimary[id] = true
 			}
@@ -340,4 +360,262 @@ func (m *LensDashboardModel) HandleScopeInputKey(key string) (handled bool, stat
 		}
 	}
 	return false, ""
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FUZZY SEARCH - Quick navigation via "/" keybinding
+// Filters the main list in-place and updates detail panel as you navigate
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ShowFuzzySearch returns true if fuzzy search is active
+func (m *LensDashboardModel) ShowFuzzySearch() bool {
+	return m.showFuzzySearch
+}
+
+// GetFuzzyInput returns the current fuzzy search input text
+func (m *LensDashboardModel) GetFuzzyInput() string {
+	return m.fuzzyInput
+}
+
+// OpenFuzzySearch opens fuzzy search mode, saving current state for restore
+func (m *LensDashboardModel) OpenFuzzySearch() {
+	m.showFuzzySearch = true
+	m.fuzzyInput = ""
+
+	// Save current state for restore on cancel
+	m.preFuzzyFlatNodes = make([]LensFlatNode, len(m.flatNodes))
+	copy(m.preFuzzyFlatNodes, m.flatNodes)
+	m.preFuzzyCursor = m.cursor
+	m.preFuzzyScroll = m.scroll
+	m.preFuzzySelectedID = m.selectedIssueID
+
+	// Save upstream nodes for centered mode
+	if m.IsCenteredMode() {
+		m.preFuzzyUpstream = make([]LensFlatNode, len(m.upstreamNodes))
+		copy(m.preFuzzyUpstream, m.upstreamNodes)
+	}
+}
+
+// CloseFuzzySearch closes fuzzy search, restoring original list
+func (m *LensDashboardModel) CloseFuzzySearch() {
+	if !m.showFuzzySearch {
+		return
+	}
+
+	// Restore original state
+	m.flatNodes = m.preFuzzyFlatNodes
+	m.cursor = m.preFuzzyCursor
+	m.scroll = m.preFuzzyScroll
+	m.selectedIssueID = m.preFuzzySelectedID
+
+	if m.IsCenteredMode() {
+		m.upstreamNodes = m.preFuzzyUpstream
+	}
+
+	m.showFuzzySearch = false
+	m.fuzzyInput = ""
+	m.preFuzzyFlatNodes = nil
+	m.preFuzzyUpstream = nil
+	m.updateDetailContent()
+}
+
+// ConfirmFuzzySearch closes fuzzy search, restoring full list but keeping selection
+func (m *LensDashboardModel) ConfirmFuzzySearch() string {
+	if !m.showFuzzySearch {
+		return ""
+	}
+
+	// Save selected ID before restoring
+	selectedID := m.selectedIssueID
+
+	// Restore original list
+	m.flatNodes = m.preFuzzyFlatNodes
+	if m.IsCenteredMode() {
+		m.upstreamNodes = m.preFuzzyUpstream
+	}
+
+	// Find and position cursor at selected item in restored list
+	m.cursor = 0
+	m.scroll = 0
+	if m.IsCenteredMode() && m.egoNode != nil {
+		// Check upstream
+		for i, fn := range m.upstreamNodes {
+			if fn.Node.Issue.ID == selectedID {
+				m.cursor = i
+				m.ensureCenteredVisible()
+				break
+			}
+		}
+		// Check ego
+		if m.egoNode.Node.Issue.ID == selectedID {
+			m.cursor = len(m.upstreamNodes)
+			m.ensureCenteredVisible()
+		}
+		// Check downstream
+		for i, fn := range m.flatNodes {
+			if fn.Node.Issue.ID == selectedID {
+				m.cursor = len(m.upstreamNodes) + 1 + i
+				m.ensureCenteredVisible()
+				break
+			}
+		}
+	} else {
+		for i, fn := range m.flatNodes {
+			if fn.Node.Issue.ID == selectedID {
+				m.cursor = i
+				m.ensureVisible()
+				break
+			}
+		}
+	}
+
+	m.showFuzzySearch = false
+	m.fuzzyInput = ""
+	m.preFuzzyFlatNodes = nil
+	m.preFuzzyUpstream = nil
+	m.updateDetailContent()
+
+	return selectedID
+}
+
+// HandleFuzzySearchKey handles a key press when fuzzy search is active
+func (m *LensDashboardModel) HandleFuzzySearchKey(key string) (handled bool, statusMsg string) {
+	switch key {
+	case "esc":
+		m.CloseFuzzySearch()
+		return true, "Search cancelled"
+
+	case "enter":
+		if len(m.flatNodes) > 0 || (m.IsCenteredMode() && m.egoNode != nil) {
+			selectedID := m.ConfirmFuzzySearch()
+			return true, fmt.Sprintf("Jumped to %s", selectedID)
+		}
+		m.CloseFuzzySearch()
+		return true, "No matches"
+
+	case "up", "k", "ctrl+p":
+		m.MoveUp()
+		m.updateDetailContent()
+		return true, ""
+
+	case "down", "j", "ctrl+n":
+		m.MoveDown()
+		m.updateDetailContent()
+		return true, ""
+
+	case "backspace", "ctrl+h":
+		if len(m.fuzzyInput) > 0 {
+			m.fuzzyInput = m.fuzzyInput[:len(m.fuzzyInput)-1]
+			m.applyFuzzyFilter()
+		}
+		return true, ""
+
+	case "ctrl+u":
+		m.fuzzyInput = ""
+		m.applyFuzzyFilter()
+		return true, ""
+
+	default:
+		// Add printable characters
+		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+			m.fuzzyInput += key
+			m.applyFuzzyFilter()
+			return true, ""
+		}
+	}
+	return false, ""
+}
+
+// applyFuzzyFilter filters the main list based on current fuzzy input
+func (m *LensDashboardModel) applyFuzzyFilter() {
+	query := strings.TrimSpace(m.fuzzyInput)
+
+	if query == "" {
+		// No query - restore original list
+		m.flatNodes = make([]LensFlatNode, len(m.preFuzzyFlatNodes))
+		copy(m.flatNodes, m.preFuzzyFlatNodes)
+		if m.IsCenteredMode() {
+			m.upstreamNodes = make([]LensFlatNode, len(m.preFuzzyUpstream))
+			copy(m.upstreamNodes, m.preFuzzyUpstream)
+		}
+		m.cursor = 0
+		m.scroll = 0
+		if len(m.flatNodes) > 0 {
+			m.selectedIssueID = m.flatNodes[0].Node.Issue.ID
+		}
+		m.updateDetailContent()
+		return
+	}
+
+	// Build source list for searching
+	var sourceNodes []LensFlatNode
+	if m.IsCenteredMode() {
+		sourceNodes = append(sourceNodes, m.preFuzzyUpstream...)
+		if m.egoNode != nil {
+			sourceNodes = append(sourceNodes, *m.egoNode)
+		}
+		sourceNodes = append(sourceNodes, m.preFuzzyFlatNodes...)
+	} else {
+		sourceNodes = m.preFuzzyFlatNodes
+	}
+
+	if len(sourceNodes) == 0 {
+		return
+	}
+
+	// Build searchable strings: "ID Title"
+	searchStrings := make([]string, len(sourceNodes))
+	for i, fn := range sourceNodes {
+		searchStrings[i] = fn.Node.Issue.ID + " " + fn.Node.Issue.Title
+	}
+
+	// Fuzzy match
+	matches := fuzzy.Find(query, searchStrings)
+
+	// Separate matches back into upstream/downstream for centered mode
+	if m.IsCenteredMode() {
+		upstreamLen := len(m.preFuzzyUpstream)
+		egoIdx := upstreamLen
+		downstreamStart := egoIdx + 1
+		if m.egoNode == nil {
+			downstreamStart = egoIdx
+		}
+
+		var newUpstream []LensFlatNode
+		var newDownstream []LensFlatNode
+
+		for _, match := range matches {
+			idx := match.Index
+			if idx < upstreamLen {
+				newUpstream = append(newUpstream, sourceNodes[idx])
+			} else if m.egoNode != nil && idx == egoIdx {
+				// Ego node always visible, skip adding to filtered list
+			} else if idx >= downstreamStart {
+				newDownstream = append(newDownstream, sourceNodes[idx])
+			}
+		}
+
+		m.upstreamNodes = newUpstream
+		m.flatNodes = newDownstream
+	} else {
+		// Flat mode - just filter flatNodes
+		m.flatNodes = make([]LensFlatNode, 0, len(matches))
+		for _, match := range matches {
+			if match.Index < len(sourceNodes) {
+				m.flatNodes = append(m.flatNodes, sourceNodes[match.Index])
+			}
+		}
+	}
+
+	// Reset cursor and update selection
+	m.cursor = 0
+	m.scroll = 0
+	if len(m.flatNodes) > 0 {
+		m.selectedIssueID = m.flatNodes[0].Node.Issue.ID
+	} else if m.IsCenteredMode() && len(m.upstreamNodes) > 0 {
+		m.selectedIssueID = m.upstreamNodes[0].Node.Issue.ID
+	} else if m.IsCenteredMode() && m.egoNode != nil {
+		m.selectedIssueID = m.egoNode.Node.Issue.ID
+	}
+	m.updateDetailContent()
 }

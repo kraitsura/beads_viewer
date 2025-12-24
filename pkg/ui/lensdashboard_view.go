@@ -34,49 +34,11 @@ func (m *LensDashboardModel) View() string {
 		contentWidth = 40
 	}
 
-	// Header
-	headerStyle := t.Renderer.NewStyle().
-		Foreground(t.Primary).
-		Bold(true)
+	// Render the sleek stats header
+	lines = append(lines, m.renderStatsHeader(contentWidth)...)
 
-	modeIcon := "🔭 " // Default lens icon for label mode
-	switch m.viewMode {
-	case "epic":
-		modeIcon = "◈ " // Epic icon
-	case "bead":
-		modeIcon = "◇ " // Bead icon
-	}
-
-	// Progress bar
-	progress := 0.0
-	if m.totalCount > 0 {
-		progress = float64(m.closedCount) / float64(m.totalCount)
-	}
-	progressBar := m.renderProgressBar(progress, 10)
-	progressText := fmt.Sprintf("%d/%d done", m.closedCount, m.totalCount)
-
-	header := fmt.Sprintf("%s%s", modeIcon, m.labelName)
-	headerLine := headerStyle.Render(header) + "  " + progressBar + " " + progressText
-	lines = append(lines, headerLine)
-
-	// Stats line
+	// statsStyle needed for view renders below
 	statsStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
-	depthStyle := t.Renderer.NewStyle().Foreground(t.InProgress).Bold(true)
-
-	statsLine := fmt.Sprintf("%d in lens  %d context  Depth: [%s]",
-		m.primaryCount, m.contextCount,
-		depthStyle.Render(m.dependencyDepth.String()))
-	lines = append(lines, statsStyle.Render(statsLine))
-
-	// Status summary
-	readyStyle := t.Renderer.NewStyle().Foreground(t.Open)
-	blockedStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
-	inProgStyle := t.Renderer.NewStyle().Foreground(t.InProgress)
-	summaryLine := fmt.Sprintf("%s ready  %s blocked  %s in progress",
-		readyStyle.Render(fmt.Sprintf("%d", m.readyCount)),
-		blockedStyle.Render(fmt.Sprintf("%d", m.blockedCount)),
-		inProgStyle.Render(fmt.Sprintf("%d", m.totalCount-m.readyCount-m.blockedCount-m.closedCount)))
-	lines = append(lines, statsStyle.Render(summaryLine))
 
 	// Scope indicator (if scope is active)
 	if len(m.scopeLabels) > 0 {
@@ -130,6 +92,26 @@ func (m *LensDashboardModel) View() string {
 		}
 	}
 
+	// Fuzzy search input (inline, filters the list below)
+	if m.showFuzzySearch {
+		inputStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+		promptStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+		countStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
+
+		// Count visible items
+		visibleCount := len(m.flatNodes)
+		if m.IsCenteredMode() {
+			visibleCount += len(m.upstreamNodes)
+			if m.egoNode != nil {
+				visibleCount++
+			}
+		}
+
+		countText := countStyle.Render(fmt.Sprintf(" (%d matches)", visibleCount))
+		searchLine := promptStyle.Render("/") + inputStyle.Render(m.fuzzyInput) + inputStyle.Render("█") + countText
+		lines = append(lines, searchLine)
+	}
+
 	lines = append(lines, "")
 
 	// Calculate visible area using viewport config
@@ -162,32 +144,8 @@ func (m *LensDashboardModel) View() string {
 	}
 	lines = append(lines, contentLines...)
 
-	// Footer
-	lines = append(lines, "")
-	footerStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Italic(true)
-
-	// Show view type indicator and toggle hint
-	viewIndicator := "[flat view]"
-	toggleHint := "w: streams"
-	navHint := "n/N: section"
-	enterHint := "enter: focus"
-	treeHint := ""
-	if m.viewMode == "epic" || m.viewMode == "bead" {
-		viewIndicator = "[centered]"
-	}
-	if m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1 {
-		viewIndicator = fmt.Sprintf("[%d streams]", m.workstreamCount)
-		toggleHint = "w: flat"
-		navHint = "n/N: stream"
-		enterHint = "enter: expand"
-		if m.wsTreeView {
-			treeHint = " • T: list • d: depth"
-		} else {
-			treeHint = " • T: tree • d: depth"
-		}
-	}
-
-	lines = append(lines, footerStyle.Render(fmt.Sprintf("%s • j/k: nav • g/G: top/bottom • %s • %s • %s%s • esc: back", viewIndicator, toggleHint, navHint, enterHint, treeHint)))
+	// Sticky keybind info bar (integrated footer)
+	lines = append(lines, m.renderKeybindBar())
 
 	return strings.Join(lines, "\n")
 }
@@ -217,14 +175,11 @@ func (m *LensDashboardModel) renderFlatView(contentWidth, visibleLines int, stat
 		allLines = append(allLines, line)
 	}
 
-	// Add header lines (matching workstream/grouped views pattern)
+	// Apply scroll window directly to content
 	var lines []string
-	viewModeStr := fmt.Sprintf("tree [depth:%s]", m.dependencyDepth.String())
-	lines = append(lines, statsStyle.Render(fmt.Sprintf("  %d issues (%s):", len(m.flatNodes), viewModeStr)))
-	lines = append(lines, "")
 
-	// Calculate visible window (2 lines for header above, rest for content)
-	contentLines := visibleLines - 2
+	// Calculate visible window
+	contentLines := visibleLines
 	if contentLines < 1 {
 		contentLines = 1
 	}
@@ -341,7 +296,7 @@ func (m *LensDashboardModel) renderCenteredView(contentWidth, visibleLines int, 
 
 	// Now apply scroll and buffer (matching flat view pattern)
 	var lines []string
-	contentLines := visibleLines - 2
+	contentLines := visibleLines
 	if contentLines < 1 {
 		contentLines = 1
 	}
@@ -724,19 +679,10 @@ func (m *LensDashboardModel) renderWorkstreamView(contentWidth, visibleLines int
 
 	// Apply scroll offset
 	var lines []string
-	viewModeStr := "list"
-	if m.wsTreeView {
-		viewModeStr = fmt.Sprintf("tree [depth:%s]", m.dependencyDepth.String())
-	}
-	if m.wsSubdivided {
-		viewModeStr += " [subdivided]"
-	}
-	lines = append(lines, wsSubStyle.Render(fmt.Sprintf("  %d workstreams (%s):", len(m.workstreams), viewModeStr)))
-	lines = append(lines, "")
 
-	// Calculate visible window (2 lines for header above, rest for content)
+	// Calculate visible window
 	totalLines := len(allLines)
-	contentLines := visibleLines - 2
+	contentLines := visibleLines
 
 	startIdx := m.wsScroll
 	if startIdx < 0 {
@@ -928,16 +874,10 @@ func (m *LensDashboardModel) renderGroupedView(contentWidth, visibleLines int, s
 
 	// Apply scroll offset
 	var lines []string
-	viewModeStr := "list"
-	if m.groupedTreeView {
-		viewModeStr = fmt.Sprintf("tree [depth:%s]", m.dependencyDepth.String())
-	}
-	lines = append(lines, subStyle.Render(fmt.Sprintf("  Grouped by %s (%d groups, %s):", m.groupByMode.String(), len(m.groupedSections), viewModeStr)))
-	lines = append(lines, "")
 
-	// Calculate visible window (2 lines for header above, rest for content)
+	// Calculate visible window
 	totalLines := len(allLines)
-	contentLines := visibleLines - 2
+	contentLines := visibleLines
 
 	startIdx := m.groupedScroll
 	if startIdx < 0 {
@@ -1011,55 +951,78 @@ func (m *LensDashboardModel) renderGroupedIssue(issue model.Issue, isSelected bo
 }
 
 // renderGroupedTreeIssue renders a single issue with tree prefix in grouped view
+// Matches the workstream view tree rendering pattern: indent → status icon → tree prefix → ID → title → badges
 func (m *LensDashboardModel) renderGroupedTreeIssue(fn LensFlatNode, isSelected bool, contentWidth int, indent string, issueStyle, issueSelectedStyle, readyStyle, blockedStyle, closedStyle, inProgStyle, subStyle lipgloss.Style) string {
 	t := m.theme
 	issue := fn.Node.Issue
+	isEpicEntry := m.isEntryEpic(issue.ID)
 
-	// Determine status icon and style
+	// Determine status icon and style (matches workstream view pattern)
 	var statusIcon string
 	var style lipgloss.Style
-	switch issue.Status {
-	case model.StatusClosed:
-		statusIcon = "✓"
-		style = closedStyle
-	case model.StatusBlocked:
-		statusIcon = "◈"
-		style = blockedStyle
-	case model.StatusInProgress:
-		statusIcon = "●"
-		style = inProgStyle
-	default:
-		// Check if blocked by dependencies
-		if m.isIssueBlockedByDeps(issue.ID) {
+	if isEpicEntry {
+		// Entry epic gets distinct diamond icon
+		statusIcon = "◆"
+		style = t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+	} else {
+		switch issue.Status {
+		case model.StatusClosed:
+			statusIcon = "✓"
+			style = closedStyle
+		case model.StatusBlocked:
 			statusIcon = "◈"
 			style = blockedStyle
-		} else {
-			statusIcon = "○"
-			style = readyStyle
+		case model.StatusInProgress:
+			statusIcon = "●"
+			style = inProgStyle
+		default:
+			// Check if blocked by dependencies
+			if m.isIssueBlockedByDeps(issue.ID) {
+				statusIcon = "◈"
+				style = blockedStyle
+			} else {
+				statusIcon = "○"
+				style = readyStyle
+			}
 		}
 	}
 
-	// Build tree prefix
-	treePrefix := fn.TreePrefix
-
-	// Selection indicator
-	issuePrefix := indent + treePrefix
+	// Selection indicator (matches workstream view pattern: indent before status icon)
+	issuePrefix := indent
 	idStyle := issueStyle
 	titleStyle := issueStyle
+	if isEpicEntry {
+		// Entry epic: always bold primary
+		idStyle = issueSelectedStyle.Foreground(t.Primary)
+		titleStyle = issueSelectedStyle.Foreground(t.Primary)
+	}
 	if isSelected {
-		// For tree view, highlight the whole line
+		issuePrefix = indent[:len(indent)-2] + "▸ "
 		idStyle = issueSelectedStyle.Foreground(t.Primary)
 		titleStyle = issueSelectedStyle
-		// Add selection marker at the beginning
-		issuePrefix = indent[:len(indent)-2] + "▸ " + treePrefix
 	}
 
-	title := truncateRunesHelper(issue.Title, contentWidth-20-len(indent)-len(treePrefix), "…")
-	return fmt.Sprintf("%s%s %s %s",
+	// Tree prefix styled dim (matches workstream view)
+	treePrefix := ""
+	if fn.TreePrefix != "" {
+		treePrefix = subStyle.Render(fn.TreePrefix) + " "
+	}
+
+	// Epic badge for entry epics
+	epicBadge := ""
+	if isEpicEntry {
+		epicBadge = subStyle.Render(" [EPIC]")
+	}
+
+	title := truncateRunesHelper(issue.Title, contentWidth-25-len(indent)-len(fn.TreePrefix), "…")
+	// Order matches workstream: prefix → status icon → tree prefix → ID → title → badge
+	return fmt.Sprintf("%s%s %s%s %s%s",
 		issuePrefix,
 		style.Render(statusIcon),
+		treePrefix,
 		idStyle.Render(issue.ID),
-		titleStyle.Render(title))
+		titleStyle.Render(title),
+		epicBadge)
 }
 
 // renderStatusHeader renders a status section header with elegant dotted dividers
@@ -1188,6 +1151,296 @@ func (m *LensDashboardModel) renderProgressBar(progress float64, width int) stri
 
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 	return t.Renderer.NewStyle().Foreground(barColor).Render("[" + bar + "]")
+}
+
+// renderStatsHeader renders the sleek, ergonomic header with progress bar and stats
+// Design: Title row with thin progress bar, compact status pills below
+func (m *LensDashboardModel) renderStatsHeader(contentWidth int) []string {
+	t := m.theme
+	var lines []string
+
+	// Style definitions
+	titleStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+	statsStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
+	readyStyle := t.Renderer.NewStyle().Foreground(t.Open)
+	activeStyle := t.Renderer.NewStyle().Foreground(t.InProgress)
+	blockedStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
+	closedStyle := t.Renderer.NewStyle().Foreground(t.Closed)
+	depthStyle := t.Renderer.NewStyle().Foreground(t.InProgress).Bold(true)
+	sepStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Faint(true)
+
+	// Mode icon
+	modeIcon := "🔭" // Default lens icon for label mode
+	switch m.viewMode {
+	case "epic":
+		modeIcon = "◈"
+	case "bead":
+		modeIcon = "◇"
+	}
+
+	// Calculate progress
+	progress := 0.0
+	if m.totalCount > 0 {
+		progress = float64(m.closedCount) / float64(m.totalCount)
+	}
+	progressPct := int(progress * 100)
+
+	// Calculate in-progress count
+	inProgressCount := m.totalCount - m.readyCount - m.blockedCount - m.closedCount
+	if inProgressCount < 0 {
+		inProgressCount = 0
+	}
+
+	// === LINE 1: Title with wide progress bar ===
+	// Calculate available width for progress bar
+	titleText := modeIcon + " " + m.labelName
+	pctText := fmt.Sprintf(" %d%%", progressPct)
+	doneText := fmt.Sprintf(" %d/%d", m.closedCount, m.totalCount)
+
+	// Progress bar width: fill remaining space
+	barWidth := contentWidth - len(titleText) - len(pctText) - len(doneText) - 4
+	if barWidth < 10 {
+		barWidth = 10
+	}
+	if barWidth > 40 {
+		barWidth = 40 // Cap progress bar width
+	}
+
+	// Render thin progress bar with modern characters
+	progressBar := m.renderThinProgressBar(progress, barWidth)
+
+	// Build first line: Title ... progress bar ... percentage
+	padding := contentWidth - len(titleText) - barWidth - len(pctText) - len(doneText) - 2
+	if padding < 2 {
+		padding = 2
+	}
+
+	line1 := titleStyle.Render(titleText) +
+		strings.Repeat(" ", padding) +
+		progressBar +
+		statsStyle.Render(doneText) +
+		depthStyle.Render(pctText)
+	lines = append(lines, line1)
+
+	// === LINE 2: Compact status pills with metadata ===
+	// Status counts with icons: ○12 ready  ●3 active  ◈5 blocked  ✓8 done
+	statusPills := readyStyle.Render(fmt.Sprintf("○%d", m.readyCount)) +
+		statsStyle.Render(" ready  ") +
+		activeStyle.Render(fmt.Sprintf("●%d", inProgressCount)) +
+		statsStyle.Render(" active  ") +
+		blockedStyle.Render(fmt.Sprintf("◈%d", m.blockedCount)) +
+		statsStyle.Render(" blocked  ") +
+		closedStyle.Render(fmt.Sprintf("✓%d", m.closedCount)) +
+		statsStyle.Render(" done")
+
+	// Metadata: lens count, context count, depth
+	sep := sepStyle.Render(" │ ")
+	metaInfo := fmt.Sprintf("%d lens", m.primaryCount)
+	if m.contextCount > 0 {
+		metaInfo += fmt.Sprintf(" · %d ctx", m.contextCount)
+	}
+	metaInfo += " · d:" + m.dependencyDepth.String()
+
+	line2 := statusPills + sep + depthStyle.Render(metaInfo)
+	lines = append(lines, line2)
+
+	// === LINE 3: Empty line for spacing ===
+	lines = append(lines, "")
+
+	return lines
+}
+
+// renderThinProgressBar renders a sleek thin progress bar with bullet indicator
+func (m *LensDashboardModel) renderThinProgressBar(progress float64, width int) string {
+	t := m.theme
+
+	filled := int(progress * float64(width))
+	if filled > width {
+		filled = width
+	}
+	if filled < 0 {
+		filled = 0
+	}
+
+	// Determine color based on progress
+	var barColor lipgloss.AdaptiveColor
+	if progress >= 1.0 {
+		barColor = t.Closed
+	} else if progress >= 0.75 {
+		barColor = t.Closed
+	} else if progress >= 0.5 {
+		barColor = t.InProgress
+	} else if progress >= 0.25 {
+		barColor = t.Open
+	} else {
+		barColor = t.Subtext
+	}
+
+	filledStyle := t.Renderer.NewStyle().Foreground(barColor)
+	emptyStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Faint(true)
+	bulletStyle := t.Renderer.NewStyle().Foreground(barColor).Bold(true)
+
+	// Build progress bar with bullet at current position
+	// Use thin bar characters: ━ for filled, ─ for empty, ● for bullet
+	if filled == 0 {
+		// No progress: bullet at start
+		return bulletStyle.Render("●") + emptyStyle.Render(strings.Repeat("─", width-1))
+	} else if filled >= width {
+		// Complete: all filled with bullet at end
+		return filledStyle.Render(strings.Repeat("━", width-1)) + bulletStyle.Render("●")
+	} else {
+		// Partial: filled portion, bullet, then empty
+		filledBar := strings.Repeat("━", filled-1)
+		emptyBar := strings.Repeat("─", width-filled)
+		return filledStyle.Render(filledBar) + bulletStyle.Render("●") + emptyStyle.Render(emptyBar)
+	}
+}
+
+// renderCompactStatsHeader renders a compact header for split view (narrower width)
+func (m *LensDashboardModel) renderCompactStatsHeader(contentWidth int) []string {
+	t := m.theme
+	var lines []string
+
+	// Style definitions
+	statsStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
+	readyStyle := t.Renderer.NewStyle().Foreground(t.Open)
+	activeStyle := t.Renderer.NewStyle().Foreground(t.InProgress)
+	blockedStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
+	closedStyle := t.Renderer.NewStyle().Foreground(t.Closed)
+	depthStyle := t.Renderer.NewStyle().Foreground(t.InProgress).Bold(true)
+
+	// Calculate progress
+	progress := 0.0
+	if m.totalCount > 0 {
+		progress = float64(m.closedCount) / float64(m.totalCount)
+	}
+	progressPct := int(progress * 100)
+
+	// Calculate in-progress count
+	inProgressCount := m.totalCount - m.readyCount - m.blockedCount - m.closedCount
+	if inProgressCount < 0 {
+		inProgressCount = 0
+	}
+
+	// === LINE 1: Progress bar with percentage ===
+	barWidth := contentWidth - 12
+	if barWidth < 10 {
+		barWidth = 10
+	}
+	if barWidth > 30 {
+		barWidth = 30
+	}
+
+	progressBar := m.renderThinProgressBar(progress, barWidth)
+	pctText := fmt.Sprintf(" %d/%d %d%%", m.closedCount, m.totalCount, progressPct)
+
+	line1 := progressBar + depthStyle.Render(pctText)
+	lines = append(lines, line1)
+
+	// === LINE 2: Compact status pills ===
+	statusPills := readyStyle.Render(fmt.Sprintf("○%d", m.readyCount)) + " " +
+		activeStyle.Render(fmt.Sprintf("●%d", inProgressCount)) + " " +
+		blockedStyle.Render(fmt.Sprintf("◈%d", m.blockedCount)) + " " +
+		closedStyle.Render(fmt.Sprintf("✓%d", m.closedCount)) + "  " +
+		statsStyle.Render(fmt.Sprintf("%d lens", m.primaryCount)) + " " +
+		depthStyle.Render("d:"+m.dependencyDepth.String())
+
+	lines = append(lines, statusPills)
+
+	return lines
+}
+
+// renderKeybindBar renders a two-line keybind info bar:
+// Line 1: Global keybinds (navigation, scope) with view mode label
+// Line 2: Mode-specific keybinds (view toggles, mode nav, external views)
+func (m *LensDashboardModel) renderKeybindBar() string {
+	t := m.theme
+
+	// Styling
+	keyStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+	descStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
+	sepStyle := t.Renderer.NewStyle().Foreground(t.Subtext).Faint(true)
+	modeStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+
+	sep := sepStyle.Render(" | ")
+
+	// Helper to format key:desc pairs
+	k := func(key, desc string) string {
+		return keyStyle.Render(key) + descStyle.Render(":"+desc)
+	}
+
+	// View mode indicator (used in both lines)
+	var viewMode string
+	switch {
+	case m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1:
+		viewMode = fmt.Sprintf("streams:%d", m.workstreamCount)
+	case m.viewType == ViewTypeGrouped && len(m.groupedSections) > 0:
+		viewMode = "grouped:" + m.groupByMode.String()
+	default:
+		viewMode = "flat"
+	}
+
+	// ══════════════════════════════════════════════════════════════════════
+	// LINE 1: Global keybinds (always the same regardless of view mode)
+	// ══════════════════════════════════════════════════════════════════════
+
+	// Navigation
+	nav := k("j/k", "nav") + " " + k("u/d", "top/bottom") + " " + k("ctrl+d/u", "page")
+
+	// Core options
+	var core string
+	if len(m.scopeLabels) > 0 {
+		core = k("/", "search") + " " + k("t", "depth") + " " + k("s", "scope") + " " + k("S", "mode")
+	} else {
+		core = k("/", "search") + " " + k("t", "depth") + " " + k("s", "scope")
+	}
+
+	line1 := modeStyle.Render(viewMode) + sep + nav + sep + core
+
+	// ══════════════════════════════════════════════════════════════════════
+	// LINE 2: Mode-specific keybinds
+	// ══════════════════════════════════════════════════════════════════════
+
+	// View toggles (mode-dependent)
+	var viewToggles string
+	switch {
+	case m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1:
+		viewToggles = k("w", "flat") + " " + k("g", "group")
+	case m.viewType == ViewTypeGrouped && len(m.groupedSections) > 0:
+		viewToggles = k("w", "streams") + " " + k("g", "flat") + " " + k("G", "cycle")
+	default:
+		viewToggles = k("w", "streams") + " " + k("g", "group")
+	}
+
+	// Mode-specific navigation
+	var modeNav string
+	switch {
+	case m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1:
+		modeNav = k("n/N", "stream") + " " + k("T", "tree") + " " + k("z/Z", "expand/collapse")
+	case m.viewType == ViewTypeGrouped && len(m.groupedSections) > 0:
+		modeNav = k("n/N", "group") + " " + k("T", "tree") + " " + k("z/Z", "expand/collapse")
+	case m.viewMode == "epic" || m.viewMode == "bead":
+		modeNav = "" // Centered mode has no extra nav
+	default:
+		modeNav = k("n/N", "section")
+	}
+
+	// External views (only in flat view)
+	var extViews string
+	if m.viewType == ViewTypeFlat {
+		extViews = k("G", "graph") + " " + k("I", "insights") + " " + k("B", "board")
+	}
+
+	// Build line 2
+	line2 := viewToggles
+	if modeNav != "" {
+		line2 += sep + modeNav
+	}
+	if extViews != "" {
+		line2 += sep + extViews
+	}
+
+	return line1 + "\n" + line2
 }
 
 // DumpToFile writes workstream information to a text file
@@ -1622,23 +1875,78 @@ func (m *LensDashboardModel) renderTreeContent(contentWidth int) string {
 	t := m.theme
 	var lines []string
 
+	// Render compact stats header for split view
+	lines = append(lines, m.renderCompactStatsHeader(contentWidth)...)
+
+	// statsStyle needed for view renders below
 	statsStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
 
-	// Stats line
-	depthStyle := t.Renderer.NewStyle().Foreground(t.InProgress).Bold(true)
+	// Scope indicator (if scope is active)
+	if len(m.scopeLabels) > 0 {
+		scopeStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+		modeStyle := t.Renderer.NewStyle().Foreground(t.InProgress)
+		tagStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
 
-	statsLine := fmt.Sprintf("%d in lens  %d context  [%s]",
-		m.primaryCount, m.contextCount,
-		depthStyle.Render(m.dependencyDepth.String()))
-	lines = append(lines, statsStyle.Render(statsLine))
+		var tags []string
+		for _, label := range m.scopeLabels {
+			tags = append(tags, tagStyle.Render("["+label+"]"))
+		}
+		modeIndicator := m.scopeMode.ShortString()
+		scopeLine := scopeStyle.Render("Scope: ") + strings.Join(tags, " ") + "  " + modeStyle.Render(modeIndicator)
+		lines = append(lines, scopeLine)
+	}
 
-	// Status summary
-	readyStyle := t.Renderer.NewStyle().Foreground(t.Open)
-	blockedStyle := t.Renderer.NewStyle().Foreground(t.Blocked)
-	summaryLine := fmt.Sprintf("%s ready  %s blocked",
-		readyStyle.Render(fmt.Sprintf("%d", m.readyCount)),
-		blockedStyle.Render(fmt.Sprintf("%d", m.blockedCount)))
-	lines = append(lines, statsStyle.Render(summaryLine))
+	// Scope input field (inline, appears when adding scope)
+	if m.showScopeInput {
+		inputStyle := t.Renderer.NewStyle().Foreground(t.Primary)
+		promptStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+		hintStyle := t.Renderer.NewStyle().Faint(true)
+
+		inputLine := promptStyle.Render("+ Scope: ") + inputStyle.Render(m.scopeInput) + inputStyle.Render("█")
+		lines = append(lines, inputLine)
+
+		// Show matching labels
+		if m.scopeInput != "" {
+			query := strings.ToLower(m.scopeInput)
+			var matches []string
+			for _, label := range m.GetAvailableScopeLabels() {
+				if strings.Contains(strings.ToLower(label), query) {
+					matches = append(matches, label)
+					if len(matches) >= 5 {
+						break
+					}
+				}
+			}
+			if len(matches) > 0 {
+				matchText := strings.Join(matches, ", ")
+				maxLen := contentWidth - 6
+				if maxLen > 0 && len(matchText) > maxLen {
+					matchText = matchText[:maxLen-3] + "..."
+				}
+				lines = append(lines, hintStyle.Render("  → "+matchText))
+			}
+		}
+	}
+
+	// Fuzzy search input (inline, filters the list below)
+	if m.showFuzzySearch {
+		inputStyle := t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
+		promptStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+		countStyle := t.Renderer.NewStyle().Foreground(t.Subtext)
+
+		visibleCount := len(m.flatNodes)
+		if m.IsCenteredMode() {
+			visibleCount += len(m.upstreamNodes)
+			if m.egoNode != nil {
+				visibleCount++
+			}
+		}
+
+		countText := countStyle.Render(fmt.Sprintf(" (%d matches)", visibleCount))
+		searchLine := promptStyle.Render("/") + inputStyle.Render(m.fuzzyInput) + inputStyle.Render("█") + countText
+		lines = append(lines, searchLine)
+	}
+
 	lines = append(lines, "")
 
 	// Calculate visible area
@@ -1659,6 +1967,9 @@ func (m *LensDashboardModel) renderTreeContent(contentWidth int) string {
 		flatLines := m.renderFlatView(contentWidth, visibleLines, statsStyle)
 		lines = append(lines, flatLines...)
 	}
+
+	// Add sticky keybind bar at bottom
+	lines = append(lines, m.renderKeybindBar())
 
 	return strings.Join(lines, "\n")
 }
