@@ -7,20 +7,20 @@ import (
 	"time"
 )
 
-// LegacyReviewSaver persists reviews as structured comments
-type LegacyReviewSaver struct {
+// CommentReviewSaver persists reviews as structured comments via bd comment
+type CommentReviewSaver struct {
 	workspaceRoot string
 }
 
-// NewLegacyReviewSaver creates a saver that uses bd comment
-func NewLegacyReviewSaver(workspaceRoot string) *LegacyReviewSaver {
-	return &LegacyReviewSaver{
+// NewCommentReviewSaver creates a saver that uses bd comment
+func NewCommentReviewSaver(workspaceRoot string) *CommentReviewSaver {
+	return &CommentReviewSaver{
 		workspaceRoot: workspaceRoot,
 	}
 }
 
 // Save implements ReviewSaver using bd comment command with structured format
-func (s *LegacyReviewSaver) Save(actions []ReviewAction) (int, []error) {
+func (s *CommentReviewSaver) Save(actions []ReviewAction) (int, []error) {
 	var errors []error
 	saved := 0
 
@@ -36,7 +36,7 @@ func (s *LegacyReviewSaver) Save(actions []ReviewAction) (int, []error) {
 	return saved, errors
 }
 
-func (s *LegacyReviewSaver) saveOne(action ReviewAction) error {
+func (s *CommentReviewSaver) saveOne(action ReviewAction) error {
 	// Build structured review comment
 	commentText := s.formatReviewComment(action)
 
@@ -58,7 +58,7 @@ func (s *LegacyReviewSaver) saveOne(action ReviewAction) error {
 }
 
 // formatReviewComment creates the structured comment format
-func (s *LegacyReviewSaver) formatReviewComment(action ReviewAction) string {
+func (s *CommentReviewSaver) formatReviewComment(action ReviewAction) string {
 	var sb strings.Builder
 
 	sb.WriteString("[REVIEW]\n")
@@ -77,7 +77,7 @@ func (s *LegacyReviewSaver) formatReviewComment(action ReviewAction) string {
 }
 
 // Close implements ReviewSaver
-func (s *LegacyReviewSaver) Close() error {
+func (s *CommentReviewSaver) Close() error {
 	return nil
 }
 

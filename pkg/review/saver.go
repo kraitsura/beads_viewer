@@ -31,5 +31,5 @@ type ReviewSaveResult struct {
 
 // NewReviewSaver creates a saver that persists reviews as comments
 func NewReviewSaver(workspaceRoot string) ReviewSaver {
-	return NewLegacyReviewSaver(workspaceRoot)
+	return NewCommentReviewSaver(workspaceRoot)
 }
