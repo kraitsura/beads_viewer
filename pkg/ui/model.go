@@ -59,11 +59,14 @@ const (
 	focusHistory
 	focusAttention
 	focusLabelPicker
-	focusSprint      // Sprint dashboard view (bv-161)
-	focusAgentPrompt // AGENTS.md integration prompt (bv-i8dk)
-	focusFlowMatrix  // Cross-label flow matrix view
-	focusTutorial    // Interactive tutorial (bv-8y31)
-	focusCassModal   // Cass session preview modal (bv-5bqh)
+	focusSprint         // Sprint dashboard view (bv-161)
+	focusAgentPrompt    // AGENTS.md integration prompt (bv-i8dk)
+	focusFlowMatrix     // Cross-label flow matrix view
+	focusTutorial       // Interactive tutorial (bv-8y31)
+	focusCassModal      // Cass session preview modal (bv-5bqh)
+	focusLensSelector   // Lens selector picker
+	focusLensDashboard  // Lens dashboard tree view
+	focusReviewDashboard // Review dashboard for issue review
 )
 
 // SortMode represents the current list sorting mode (bv-3ita)
@@ -270,6 +273,9 @@ type Model struct {
 	graphView          GraphModel
 	insightsPanel      InsightsModel
 	flowMatrix         FlowMatrixModel // Cross-label flow matrix
+	lensDashboard      LensDashboardModel   // Advanced tree-based dashboard with workstream support
+	lensSelector       LensSelectorModel    // Lens picker for selecting label/epic/bead to explore
+	reviewDashboard    *ReviewDashboardModel // Review dashboard for reviewing issues
 	theme              Theme
 
 	// Update State
@@ -306,6 +312,13 @@ type Model struct {
 	labelHealthCache         analysis.LabelAnalysisResult
 	attentionCached          bool
 	attentionCache           analysis.LabelAttentionResult
+
+	// Lens dashboard state
+	showLensDashboard        bool   // Show the lens dashboard (tree view with workstreams)
+	showLensSelector         bool   // Show the lens selector picker
+	lensViewOrigin           bool   // True if current view (graph/insights/board) was opened from lens dashboard
+	showReviewDashboard      bool   // Show the review dashboard
+	reviewDashboardOrigin    string // Where review dashboard was opened from
 
 	// Actionable view
 	actionableView ActionableModel
@@ -1604,6 +1617,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle lens selector overlay before global keys (esc/q/etc.)
+		if m.showLensSelector || m.focused == focusLensSelector {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			m = m.handleLensSelectorKeys(msg)
+			return m, nil
+		}
+
+		// Handle lens dashboard overlay before global keys (esc/q/etc.)
+		if m.showLensDashboard || m.focused == focusLensDashboard {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			m = m.handleLensDashboardKeys(msg)
+			return m, nil
+		}
+
+		// Handle review dashboard overlay before global keys (esc/q/etc.)
+		if m.showReviewDashboard || m.focused == focusReviewDashboard {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			var cmd tea.Cmd
+			m, cmd = m.handleReviewDashboardKeys(msg)
+			return m, cmd
+		}
+
 		// Handle quit confirmation first
 		if m.showQuitConfirm {
 			switch msg.String() {
@@ -1810,7 +1851,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if m.focused == focusInsights {
-					m.focused = focusList
+					if m.lensViewOrigin {
+						m.lensViewOrigin = false
+						m.showLensDashboard = true
+						m.focused = focusLensDashboard
+					} else {
+						m.focused = focusList
+					}
 					return m, nil
 				}
 				if m.focused == focusFlowMatrix {
@@ -1823,12 +1870,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if m.isGraphView {
 					m.isGraphView = false
-					m.focused = focusList
+					if m.lensViewOrigin {
+						m.lensViewOrigin = false
+						m.showLensDashboard = true
+						m.focused = focusLensDashboard
+					} else {
+						m.focused = focusList
+					}
 					return m, nil
 				}
 				if m.isBoardView {
 					m.isBoardView = false
-					m.focused = focusList
+					if m.lensViewOrigin {
+						m.lensViewOrigin = false
+						m.showLensDashboard = true
+						m.focused = focusLensDashboard
+					} else {
+						m.focused = focusList
+					}
 					return m, nil
 				}
 				return m, tea.Quit
@@ -1840,7 +1899,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if m.focused == focusInsights {
-					m.focused = focusList
+					if m.lensViewOrigin {
+						m.lensViewOrigin = false
+						m.showLensDashboard = true
+						m.focused = focusLensDashboard
+					} else {
+						m.focused = focusList
+					}
 					return m, nil
 				}
 				if m.focused == focusFlowMatrix {
@@ -1853,12 +1918,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if m.isGraphView {
 					m.isGraphView = false
-					m.focused = focusList
+					if m.lensViewOrigin {
+						m.lensViewOrigin = false
+						m.showLensDashboard = true
+						m.focused = focusLensDashboard
+					} else {
+						m.focused = focusList
+					}
 					return m, nil
 				}
 				if m.isBoardView {
 					m.isBoardView = false
-					m.focused = focusList
+					if m.lensViewOrigin {
+						m.lensViewOrigin = false
+						m.showLensDashboard = true
+						m.focused = focusLensDashboard
+					} else {
+						m.focused = focusList
+					}
 					return m, nil
 				}
 				if m.isActionableView {
@@ -2144,6 +2221,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.focused = focusLabelPicker
 				return m, nil
 
+			case "L":
+				// Open lens selector (Shift+L) for label/epic/bead exploration
+				m.clearAttentionOverlay()
+				m.isGraphView = false
+				m.isBoardView = false
+				m.isActionableView = false
+				m.isHistoryView = false
+				m.isSprintView = false
+				m.showLensSelector = true
+				m.focused = focusLensSelector
+				// Initialize lens selector with issues and graph stats
+				m.lensSelector = NewLensSelectorModel(m.issues, m.theme, m.analysis)
+				m.lensSelector.SetSize(m.width, m.height-1)
+				m.statusMsg = "Lens: / search • j/k nav • s scope • enter select • esc cancel"
+				m.statusIsError = false
+				return m, nil
+
 			}
 
 			// Focus-specific key handling
@@ -2209,6 +2303,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case focusFlowMatrix:
 				m = m.handleFlowMatrixKeys(msg)
+
+			case focusLensSelector:
+				m = m.handleLensSelectorKeys(msg)
+
+			case focusLensDashboard:
+				m = m.handleLensDashboardKeys(msg)
+
+			case focusReviewDashboard:
+				m, cmd = m.handleReviewDashboardKeys(msg)
+				cmds = append(cmds, cmd)
 
 			case focusList:
 				m = m.handleListKeys(msg)
@@ -3353,6 +3457,14 @@ func (m Model) View() string {
 		body = m.repoPicker.View()
 	} else if m.showLabelPicker {
 		body = m.labelPicker.View()
+	} else if m.showLensSelector {
+		body = m.lensSelector.View()
+	} else if m.showLensDashboard {
+		m.lensDashboard.SetSize(m.width, m.height-1)
+		body = m.lensDashboard.View()
+	} else if m.showReviewDashboard && m.reviewDashboard != nil {
+		m.reviewDashboard.SetSize(m.width, m.height-1)
+		body = m.reviewDashboard.View()
 	} else if m.showHelp {
 		body = m.renderHelpOverlay()
 	} else if m.showTutorial {
@@ -6058,4 +6170,508 @@ func (m *Model) RenderDebugView(viewName string, width, height int) string {
 	default:
 		return "Unknown view: " + viewName
 	}
+}
+
+// handleLensSelectorKeys handles keyboard input when lens selector is focused
+func (m Model) handleLensSelectorKeys(msg tea.KeyMsg) Model {
+	// Pass key to lens selector
+	handled := m.lensSelector.Update(msg.String())
+
+	// Check if selection was made
+	if m.lensSelector.IsConfirmed() {
+		selectedItem := m.lensSelector.SelectedItem()
+		if selectedItem != nil {
+			m.showLensSelector = false
+
+			// Build issue map
+			issueMap := make(map[string]*model.Issue)
+			for i := range m.issues {
+				issueMap[m.issues[i].ID] = &m.issues[i]
+			}
+			m.issueMap = issueMap
+
+			// Check if review mode was requested
+			if m.lensSelector.IsReviewRequested() {
+				// Open review dashboard for the selected item
+				// Review dashboard works best with epics/beads that have a tree structure
+				rootID := selectedItem.Value
+				if selectedItem.Type == "label" {
+					// For labels, we can't really review - show a message
+					m.statusMsg = "Review mode works best with epics or beads"
+					m.statusIsError = true
+					m.lensSelector.Reset()
+					return m
+				}
+
+				// Create review dashboard
+				reviewDash, err := NewReviewDashboardModel(rootID, m.issues, "", string(model.ReviewTypePlan), m.theme, m.workDir)
+				if err != nil {
+					m.statusMsg = fmt.Sprintf("Error opening review: %v", err)
+					m.statusIsError = true
+					m.lensSelector.Reset()
+					return m
+				}
+				m.reviewDashboard = reviewDash
+				m.reviewDashboard.SetSize(m.width, m.height-1)
+				m.showReviewDashboard = true
+				m.reviewDashboardOrigin = "lens_selector"
+				m.focused = focusReviewDashboard
+				m.statusMsg = fmt.Sprintf("Review: %s • j/k nav • a approve • x reject • d defer • ? help", selectedItem.Title)
+				m.statusIsError = false
+				return m
+			}
+
+			// Normal selection - open lens dashboard
+			m.showLensDashboard = true
+			m.focused = focusLensDashboard
+
+			// Initialize lens dashboard with selected label/epic/bead
+			switch selectedItem.Type {
+			case "epic":
+				m.lensDashboard = NewEpicLensModel(selectedItem.Value, selectedItem.Title, m.issues, issueMap, m.theme)
+			case "bead":
+				m.lensDashboard = NewBeadLensModel(selectedItem.Value, m.issues, issueMap, m.theme)
+			default: // "label"
+				m.lensDashboard = NewLensDashboardModel(selectedItem.Value, m.issues, issueMap, m.theme)
+			}
+
+			// Apply scope labels and scope mode from lens selector to lens dashboard for smooth UX
+			if scopeLabels := m.lensSelector.ScopeLabels(); len(scopeLabels) > 0 {
+				for _, label := range scopeLabels {
+					m.lensDashboard.AddScopeLabel(label)
+				}
+				// Also apply scope match mode (union/intersection)
+				m.lensDashboard.SetScopeMode(m.lensSelector.ScopeMatchMode())
+			}
+
+			m.lensDashboard.SetSize(m.width, m.height-1)
+			m.statusMsg = fmt.Sprintf("Lens: %s • j/k nav • w workstreams • d depth • c centered", selectedItem.Title)
+			m.statusIsError = false
+		}
+		return m
+	}
+
+	// Check if cancelled
+	if m.lensSelector.IsCancelled() {
+		m.showLensSelector = false
+		m.isSplitView = m.width > SplitViewThreshold
+		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
+		m.statusMsg = ""
+		return m
+	}
+
+	// Handle escape to close
+	if !handled && (msg.String() == "esc" || msg.String() == "q") {
+		m.showLensSelector = false
+		m.isSplitView = m.width > SplitViewThreshold
+		m.focused = focusList
+		if m.isSplitView {
+			m.focused = focusDetail
+		}
+		m.updateViewportContent()
+		m.statusMsg = ""
+	}
+
+	return m
+}
+
+// handleLensDashboardKeys handles keyboard input when lens dashboard is focused
+func (m Model) handleLensDashboardKeys(msg tea.KeyMsg) Model {
+	// Handle fuzzy search mode first (when searching with /)
+	if m.lensDashboard.ShowFuzzySearch() {
+		handled, statusMsg := m.lensDashboard.HandleFuzzySearchKey(msg.String())
+		if handled {
+			if statusMsg != "" {
+				m.statusMsg = statusMsg
+				m.statusIsError = false
+			}
+			return m
+		}
+	}
+
+	// Handle scope input mode (when typing a label to add to scope)
+	if m.lensDashboard.ShowScopeInput() {
+		handled, statusMsg := m.lensDashboard.HandleScopeInputKey(msg.String())
+		if handled {
+			if statusMsg != "" {
+				m.statusMsg = statusMsg
+				m.statusIsError = false
+			}
+			return m
+		}
+	}
+
+	switch msg.String() {
+	case "w":
+		// Toggle between flat and workstream views
+		m.lensDashboard.ToggleViewType()
+		if m.lensDashboard.IsWorkstreamView() {
+			m.statusMsg = "Switched to workstream view"
+		} else {
+			m.statusMsg = "Switched to flat view"
+		}
+		m.statusIsError = false
+	case "j", "down":
+		if m.lensDashboard.IsDetailFocused() {
+			m.lensDashboard.ScrollDetailDown()
+		} else {
+			m.lensDashboard.MoveDown()
+		}
+	case "k", "up":
+		if m.lensDashboard.IsDetailFocused() {
+			m.lensDashboard.ScrollDetailUp()
+		} else {
+			m.lensDashboard.MoveUp()
+		}
+	case "g":
+		// Toggle grouped view (enter if not in grouped, exit if already in grouped)
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.ExitGroupedView()
+			m.statusMsg = "Switched to flat view"
+		} else {
+			m.lensDashboard.EnterGroupedView()
+			m.statusMsg = fmt.Sprintf("Grouped view (by %s)", m.lensDashboard.GetGroupByMode())
+		}
+		m.statusIsError = false
+	case "G":
+		// Cycle group-by mode when in grouped view
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.CycleGroupByMode()
+			m.statusMsg = fmt.Sprintf("Grouping by %s", m.lensDashboard.GetGroupByMode())
+			m.statusIsError = false
+		} else if !m.lensDashboard.IsWorkstreamView() {
+			// In flat view: open graph view scoped to lens dashboard items
+			scopedIssues := m.lensDashboard.GetAllDisplayIssues()
+			if len(scopedIssues) > 0 && m.analysis != nil {
+				scopedInsights := m.analysis.GenerateInsights(len(scopedIssues))
+				m.graphView.SetIssues(scopedIssues, &scopedInsights)
+				m.isGraphView = true
+				m.showLensDashboard = false
+				m.lensViewOrigin = true
+				m.focused = focusGraph
+				m.statusMsg = fmt.Sprintf("Graph view: %d issues from lens", len(scopedIssues))
+				m.statusIsError = false
+			}
+		}
+	case "I":
+		// Open insights view scoped to lens dashboard items
+		scopedIssues := m.lensDashboard.GetAllDisplayIssues()
+		if len(scopedIssues) > 0 && m.analysis != nil {
+			// Build scoped issueMap
+			scopedIssueMap := make(map[string]*model.Issue, len(scopedIssues))
+			for i := range scopedIssues {
+				scopedIssueMap[scopedIssues[i].ID] = &scopedIssues[i]
+			}
+			// Generate insights for scoped issues
+			scopedInsights := m.analysis.GenerateInsights(len(scopedIssues))
+			m.insightsPanel = NewInsightsModel(scopedInsights, scopedIssueMap, m.theme)
+			// Compute triage for priority panel
+			triage := analysis.ComputeTriageFromAnalyzer(m.analyzer, m.analysis, scopedIssues, analysis.TriageOptions{}, time.Now())
+			m.insightsPanel.SetTopPicks(triage.QuickRef.TopPicks)
+			dataHash := fmt.Sprintf("v%s@%s#%d", triage.Meta.Version, triage.Meta.GeneratedAt.Format("15:04:05"), triage.Meta.IssueCount)
+			m.insightsPanel.SetRecommendations(triage.Recommendations, dataHash)
+			panelHeight := m.height - 2
+			if panelHeight < 3 {
+				panelHeight = 3
+			}
+			m.insightsPanel.SetSize(m.width, panelHeight)
+			// Switch to insights view
+			m.showLensDashboard = false
+			m.lensViewOrigin = true
+			m.focused = focusInsights
+			m.statusMsg = fmt.Sprintf("Insights view: %d issues from lens", len(scopedIssues))
+			m.statusIsError = false
+		}
+	case "B":
+		// Open board view scoped to lens dashboard items
+		scopedIssues := m.lensDashboard.GetAllDisplayIssues()
+		if len(scopedIssues) > 0 {
+			m.board.SetIssues(scopedIssues)
+			// Switch to board view
+			m.showLensDashboard = false
+			m.lensViewOrigin = true
+			m.isBoardView = true
+			m.isGraphView = false
+			m.isActionableView = false
+			m.isHistoryView = false
+			m.focused = focusBoard
+			m.statusMsg = fmt.Sprintf("Board view: %d issues from lens", len(scopedIssues))
+			m.statusIsError = false
+		}
+	case "u":
+		// Go to top
+		m.lensDashboard.GoToTop()
+	case "ctrl+d":
+		if m.lensDashboard.IsDetailFocused() {
+			m.lensDashboard.ScrollDetailPageDown()
+		} else {
+			m.lensDashboard.PageDown()
+		}
+	case "ctrl+u":
+		if m.lensDashboard.IsDetailFocused() {
+			m.lensDashboard.ScrollDetailPageUp()
+		} else {
+			m.lensDashboard.PageUp()
+		}
+	case "]":
+		// Next section/workstream/group
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.NextGroup()
+			m.statusMsg = fmt.Sprintf("Group: %s", m.lensDashboard.CurrentGroupName())
+		} else if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.NextWorkstream()
+			m.statusMsg = fmt.Sprintf("Workstream: %s", m.lensDashboard.CurrentWorkstreamName())
+		} else {
+			m.lensDashboard.NextSection()
+		}
+		m.statusIsError = false
+	case "[":
+		// Previous section/workstream/group
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.PrevGroup()
+			m.statusMsg = fmt.Sprintf("Group: %s", m.lensDashboard.CurrentGroupName())
+		} else if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.PrevWorkstream()
+			m.statusMsg = fmt.Sprintf("Workstream: %s", m.lensDashboard.CurrentWorkstreamName())
+		} else {
+			m.lensDashboard.PrevSection()
+		}
+		m.statusIsError = false
+	case "t":
+		// Cycle depth
+		m.lensDashboard.CycleDepth()
+		// In workstream/grouped view: ensure current section is expanded after depth change
+		if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.ExpandWorkstream()
+		} else if m.lensDashboard.IsGroupedView() {
+			// Expand current group (only expand, don't toggle)
+			m.lensDashboard.ExpandGroup()
+		}
+		m.statusMsg = fmt.Sprintf("Depth: %v", m.lensDashboard.GetDepth())
+		m.statusIsError = false
+	case "T":
+		// Toggle tree view within workstreams or grouped view
+		if m.lensDashboard.IsWorkstreamView() {
+			// Expand workstream if closed before toggling tree view
+			m.lensDashboard.ExpandWorkstream()
+			m.lensDashboard.ToggleWSTreeView()
+			if m.lensDashboard.IsWSTreeView() {
+				m.statusMsg = "Tree view enabled"
+			} else {
+				m.statusMsg = "Tree view disabled"
+			}
+			m.statusIsError = false
+		} else if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.ToggleGroupedTreeView()
+			if m.lensDashboard.IsGroupedTreeView() {
+				m.statusMsg = "Tree view enabled"
+			} else {
+				m.statusMsg = "Tree view disabled"
+			}
+			m.statusIsError = false
+		}
+	case "d":
+		// Go to bottom
+		m.lensDashboard.GoToBottom()
+	case "tab":
+		// Toggle focus between tree and detail panels in split view
+		if m.lensDashboard.IsSplitView() {
+			m.lensDashboard.ToggleDetailFocus()
+			if m.lensDashboard.IsDetailFocused() {
+				m.statusMsg = "Detail panel focused (j/k to scroll)"
+			} else {
+				m.statusMsg = "Tree panel focused"
+			}
+			m.statusIsError = false
+		}
+	case "z":
+		// Expand all groups/workstreams
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.ExpandAllGroups()
+			m.statusMsg = "Expanded all groups"
+		} else if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.ExpandAllWorkstreams()
+			m.statusMsg = "Expanded all workstreams"
+		}
+		m.statusIsError = false
+	case "Z":
+		// Collapse all groups/workstreams
+		if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.CollapseAllGroups()
+			m.statusMsg = "Collapsed all groups"
+		} else if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.CollapseAllWorkstreams()
+			m.statusMsg = "Collapsed all workstreams"
+		}
+		m.statusIsError = false
+	case "C":
+		// Copy bead ID and title to clipboard
+		id := m.lensDashboard.SelectedIssueID()
+		if issue := m.lensDashboard.issueMap[id]; issue != nil {
+			text := fmt.Sprintf("%s: %s", id, issue.Title)
+			if err := clipboard.WriteAll(text); err != nil {
+				m.statusMsg = fmt.Sprintf("Clipboard error: %v", err)
+				m.statusIsError = true
+			} else {
+				m.statusMsg = fmt.Sprintf("Copied: %s", text)
+				m.statusIsError = false
+			}
+		}
+	case "P":
+		// Copy work prompt to clipboard for agents
+		id := m.lensDashboard.SelectedIssueID()
+		if issue := m.lensDashboard.issueMap[id]; issue != nil {
+			prompt := fmt.Sprintf("Start work on %s: %s. Claim this task and implement the required changes.", id, issue.Title)
+			if err := clipboard.WriteAll(prompt); err != nil {
+				m.statusMsg = fmt.Sprintf("Clipboard error: %v", err)
+				m.statusIsError = true
+			} else {
+				m.statusMsg = fmt.Sprintf("Copied work prompt for %s", id)
+				m.statusIsError = false
+			}
+		}
+	case "s":
+		// Open scope input to add a label filter
+		m.lensDashboard.OpenScopeInput()
+		m.statusMsg = "Enter label to add to scope (Tab: complete, Enter: add, Esc: cancel)"
+		m.statusIsError = false
+	case "S":
+		// Toggle scope mode between union (ANY) and intersection (ALL)
+		if m.lensDashboard.HasScope() {
+			m.lensDashboard.ToggleScopeMode()
+			m.statusMsg = fmt.Sprintf("Scope mode: %s", m.lensDashboard.GetScopeMode().String())
+			m.statusIsError = false
+		}
+	case "backspace", "ctrl+h":
+		// Remove last scope label (when not in scope input mode)
+		if m.lensDashboard.HasScope() {
+			m.lensDashboard.RemoveLastScopeLabel()
+			if m.lensDashboard.HasScope() {
+				m.statusMsg = fmt.Sprintf("Scope: %s", strings.Join(m.lensDashboard.GetScopeLabels(), ", "))
+			} else {
+				m.statusMsg = "Scope cleared"
+			}
+			m.statusIsError = false
+		}
+	case "/":
+		// Open fuzzy search to quickly find and jump to an issue
+		m.lensDashboard.OpenFuzzySearch()
+		m.statusMsg = "Search: type to filter • ↑/↓ select • Enter jump • Esc cancel"
+		m.statusIsError = false
+	case "r":
+		// Open review dashboard for selected bead
+		id := m.lensDashboard.SelectedIssueID()
+		if id != "" {
+			reviewDash, err := NewReviewDashboardModel(id, m.issues, "", string(model.ReviewTypePlan), m.theme, m.workDir)
+			if err != nil {
+				m.statusMsg = fmt.Sprintf("Error opening review: %v", err)
+				m.statusIsError = true
+				return m
+			}
+			m.reviewDashboard = reviewDash
+			m.reviewDashboard.SetSize(m.width, m.height-1)
+			m.showLensDashboard = false
+			m.showReviewDashboard = true
+			m.reviewDashboardOrigin = "lens_dashboard"
+			m.focused = focusReviewDashboard
+			// Get issue title for status message
+			issueTitle := id
+			if issue := m.lensDashboard.issueMap[id]; issue != nil {
+				issueTitle = issue.Title
+			}
+			m.statusMsg = fmt.Sprintf("Review: %s • j/k nav • a approve • x reject • d defer • ? help", issueTitle)
+			m.statusIsError = false
+		}
+	case "?", "f1":
+		// Toggle help overlay
+		m.showHelp = !m.showHelp
+		if m.showHelp {
+			m.focused = focusHelp
+			m.helpScroll = 0
+		} else {
+			m.focused = focusLensDashboard
+		}
+	case "esc", "q":
+		// Go back to lens selector instead of closing entirely
+		m.showLensDashboard = false
+		m.showLensSelector = true
+		m.focused = focusLensSelector
+		m.lensSelector.Reset()
+		m.lensSelector.SetSize(m.width, m.height-1)
+	case "enter":
+		// In workstream view: toggle expand/collapse of current workstream
+		// In grouped view: toggle expand/collapse of current group
+		// In flat view: do nothing (enter is a no-op)
+		if m.lensDashboard.IsWorkstreamView() {
+			m.lensDashboard.ToggleWorkstreamExpand()
+			if m.lensDashboard.IsWorkstreamExpanded(m.lensDashboard.GetWsCursor()) {
+				m.statusMsg = fmt.Sprintf("Expanded: %s", m.lensDashboard.CurrentWorkstreamName())
+			} else {
+				m.statusMsg = fmt.Sprintf("Collapsed: %s", m.lensDashboard.CurrentWorkstreamName())
+			}
+			m.statusIsError = false
+		} else if m.lensDashboard.IsGroupedView() {
+			m.lensDashboard.ToggleGroupedExpand()
+			if m.lensDashboard.IsGroupExpanded(m.lensDashboard.GetGroupedCursor()) {
+				m.statusMsg = fmt.Sprintf("Expanded: %s", m.lensDashboard.CurrentGroupName())
+			} else {
+				m.statusMsg = fmt.Sprintf("Collapsed: %s", m.lensDashboard.CurrentGroupName())
+			}
+			m.statusIsError = false
+		}
+		// In flat view, do nothing
+	}
+	return m
+}
+
+// handleReviewDashboardKeys handles keyboard input when review dashboard is focused
+func (m Model) handleReviewDashboardKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if m.reviewDashboard == nil {
+		return m, nil
+	}
+
+	// Pass all keys to the review dashboard (including q/esc for proper quit flow)
+	var cmd tea.Cmd
+	m.reviewDashboard, cmd = m.reviewDashboard.Update(msg)
+
+	// Check if the review dashboard wants to quit
+	if m.reviewDashboard.IsQuitting() {
+		// Save reviews if requested
+		if m.reviewDashboard.ShouldSave() {
+			result := m.reviewDashboard.SaveReviews()
+			if result.Failed > 0 {
+				m.statusMsg = fmt.Sprintf("Saved %d reviews, %d failed", result.Saved, result.Failed)
+				m.statusIsError = true
+			} else if result.Saved > 0 {
+				m.statusMsg = fmt.Sprintf("Saved %d reviews to comments", result.Saved)
+				m.statusIsError = false
+			}
+		} else if m.reviewDashboard.PendingSaveCount() > 0 {
+			m.statusMsg = "Reviews discarded"
+			m.statusIsError = false
+		}
+
+		// Close the review dashboard
+		m.showReviewDashboard = false
+		m.reviewDashboard = nil
+
+		// Return to where we came from
+		if m.reviewDashboardOrigin == "lens_dashboard" {
+			m.showLensDashboard = true
+			m.focused = focusLensDashboard
+		} else if m.reviewDashboardOrigin == "lens_selector" {
+			m.showLensSelector = true
+			m.focused = focusLensSelector
+		} else {
+			m.isSplitView = m.width > SplitViewThreshold
+			m.focused = focusList
+		}
+		return m, nil
+	}
+
+	return m, cmd
 }

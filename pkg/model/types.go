@@ -32,6 +32,10 @@ type Issue struct {
 	Dependencies       []*Dependency `json:"dependencies,omitempty"`
 	Comments           []*Comment    `json:"comments,omitempty"`
 	SourceRepo         string        `json:"source_repo,omitempty"`
+	// Review fields
+	ReviewStatus       string        `json:"review_status,omitempty"`   // unreviewed, approved, needs_revision, deferred
+	ReviewedBy         string        `json:"reviewed_by,omitempty"`     // reviewer identifier
+	ReviewedAt         time.Time     `json:"reviewed_at,omitempty"`     // when last reviewed
 }
 
 // Clone creates a deep copy of the issue
