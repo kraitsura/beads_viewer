@@ -419,9 +419,8 @@ func (m *LensDashboardModel) ensureGroupedVisible() {
 	}
 
 	// Calculate visible lines using viewport config
-	// renderGroupedView adds 2 lines for header, rest is content
 	vp := m.calculateViewport()
-	contentLines := vp.ContentHeight - 2
+	contentLines := vp.ContentHeight
 	if contentLines < 5 {
 		contentLines = 5
 	}
@@ -433,10 +432,14 @@ func (m *LensDashboardModel) ensureGroupedVisible() {
 		targetScroll = 0
 	}
 
-	// Clamp to max scroll to keep cursor visible within viewport
+	// Allow scroll to center last items (with empty padding below)
 	totalLines := m.getTotalGroupedLines()
-	maxScroll := totalLines - contentLines + scrolloff
-	if maxScroll > 0 && targetScroll > maxScroll {
+	scrolloffForBottom := contentLines / 4
+	maxScroll := totalLines - contentLines + scrolloffForBottom
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if targetScroll > maxScroll {
 		targetScroll = maxScroll
 	}
 
@@ -495,9 +498,8 @@ func (m *LensDashboardModel) ensureVisibleWS() {
 	cursorLine := m.getWSCursorLine()
 
 	// Calculate visible lines using viewport config
-	// renderWorkstreamView adds 2 lines for header, rest is content
 	vp := m.calculateViewport()
-	contentLines := vp.ContentHeight - 2
+	contentLines := vp.ContentHeight
 	if contentLines < 3 {
 		contentLines = 3
 	}
@@ -509,10 +511,14 @@ func (m *LensDashboardModel) ensureVisibleWS() {
 		targetScroll = 0
 	}
 
-	// Clamp to max scroll to keep cursor visible within viewport
+	// Allow scroll to center last items (with empty padding below)
 	totalLines := m.getTotalWSLines()
-	maxScroll := totalLines - contentLines + scrolloff
-	if maxScroll > 0 && targetScroll > maxScroll {
+	scrolloffForBottom := contentLines / 4
+	maxScroll := totalLines - contentLines + scrolloffForBottom
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if targetScroll > maxScroll {
 		targetScroll = maxScroll
 	}
 
@@ -641,8 +647,8 @@ func (m *LensDashboardModel) ensureVisible() {
 	}
 
 	vp := m.calculateViewport()
-	// Use contentLines to match renderFlatView offset (subtracts 2 for header)
-	contentLines := vp.ContentHeight - 2
+	// contentLines matches the actual visible content area
+	contentLines := vp.ContentHeight
 	if contentLines < 5 {
 		contentLines = 5
 	}
@@ -657,10 +663,14 @@ func (m *LensDashboardModel) ensureVisible() {
 		targetScrollLine = 0
 	}
 
-	// Clamp to max scroll to keep cursor visible within viewport
+	// Allow scroll to center last items (with empty padding below)
 	totalLines := m.getTotalFlatLines()
-	maxScroll := totalLines - contentLines + scrolloff
-	if maxScroll > 0 && targetScrollLine > maxScroll {
+	scrolloffForBottom := contentLines / 4
+	maxScroll := totalLines - contentLines + scrolloffForBottom
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if targetScrollLine > maxScroll {
 		targetScrollLine = maxScroll
 	}
 
@@ -688,6 +698,88 @@ func (m *LensDashboardModel) findNodeForLine(targetLine int) int {
 	return len(m.flatNodes) - 1
 }
 
+// getTotalCenteredLines returns total rendered lines for centered view
+// This must match exactly what renderCenteredView produces
+func (m *LensDashboardModel) getTotalCenteredLines() int {
+	lines := 0
+
+	// UPSTREAM section: header + nodes + blank line
+	if len(m.upstreamNodes) > 0 {
+		lines += 1 + len(m.upstreamNodes) + 1 // header + nodes + blank
+	}
+
+	// EGO section: top line + ego + bottom line + blank
+	if m.egoNode != nil {
+		lines += 4 // top, ego, bottom, blank
+	}
+
+	// DOWNSTREAM section: header + status headers + nodes
+	if len(m.flatNodes) > 0 {
+		lines++ // DESCENDANTS header
+		lastStatus := ""
+		for _, fn := range m.flatNodes {
+			if fn.Status != lastStatus {
+				lines++ // status header
+				lastStatus = fn.Status
+			}
+			lines++ // node line
+		}
+	} else if len(m.upstreamNodes) == 0 {
+		// "No descendants found" line when both sections are empty
+		lines++
+	}
+
+	return lines
+}
+
+// getCenteredCursorLine returns the line position for the current cursor
+// accounting for section headers and decorations
+func (m *LensDashboardModel) getCenteredCursorLine() int {
+	upstreamLen := len(m.upstreamNodes)
+	linePos := 0
+
+	// If cursor is in upstream section
+	if m.cursor < upstreamLen {
+		// Line = 1 (header) + cursor position
+		return 1 + m.cursor
+	}
+
+	// Account for upstream section
+	if upstreamLen > 0 {
+		linePos = 1 + upstreamLen + 1 // header + nodes + blank
+	}
+
+	// If cursor is on ego node
+	if m.cursor == upstreamLen {
+		// Ego is at: upstream lines + 1 (top line)
+		return linePos + 1
+	}
+
+	// Account for ego section
+	if m.egoNode != nil {
+		linePos += 4 // top, ego, bottom, blank
+	}
+
+	// Cursor is in downstream section
+	downstreamIdx := m.cursor - upstreamLen - 1
+	if downstreamIdx >= 0 && downstreamIdx < len(m.flatNodes) {
+		linePos++ // DESCENDANTS header
+
+		lastStatus := ""
+		for i := 0; i <= downstreamIdx; i++ {
+			if m.flatNodes[i].Status != lastStatus {
+				linePos++ // status header
+				lastStatus = m.flatNodes[i].Status
+			}
+			if i < downstreamIdx {
+				linePos++ // node line (don't count target node)
+			}
+		}
+	}
+
+	return linePos
+}
+
 // ensureCenteredVisible adjusts scroll to keep cursor visible in centered mode
 func (m *LensDashboardModel) ensureCenteredVisible() {
 	if m.egoNode == nil {
@@ -695,24 +787,30 @@ func (m *LensDashboardModel) ensureCenteredVisible() {
 	}
 
 	vp := m.calculateViewport()
-	// Use contentLines to match renderCenteredView offset (subtracts 2)
-	contentLines := vp.ContentHeight - 2
+	// Use contentLines matching renderCenteredView (ContentHeight already excludes footer)
+	contentLines := vp.ContentHeight
 	if contentLines < 5 {
 		contentLines = 5
 	}
 
+	// Get the actual LINE position of the cursor (not item index)
+	cursorLine := m.getCenteredCursorLine()
+
 	// Center cursor in viewport with reduced scrolloff (1/4 viewport instead of 1/2)
 	scrolloff := contentLines / 4
-	targetScroll := m.cursor - scrolloff
+	targetScroll := cursorLine - scrolloff
 	if targetScroll < 0 {
 		targetScroll = 0
 	}
 
-	// Clamp to max scroll to keep cursor visible within viewport
-	// Total navigable items: upstream nodes + ego node + downstream nodes
-	totalItems := len(m.upstreamNodes) + 1 + len(m.flatNodes)
-	maxScroll := totalItems - contentLines + scrolloff
-	if maxScroll > 0 && targetScroll > maxScroll {
+	// Allow scroll to center last items (with empty padding below)
+	totalLines := m.getTotalCenteredLines()
+	scrolloffForBottom := contentLines / 4
+	maxScroll := totalLines - contentLines + scrolloffForBottom
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if targetScroll > maxScroll {
 		targetScroll = maxScroll
 	}
 

@@ -60,6 +60,7 @@ func (m *LensDashboardModel) View() string {
 	}
 
 	// Scope input field (inline, appears when adding scope)
+	// Always outputs exactly 2 lines when active (to match calculateViewport)
 	if m.showScopeInput {
 		inputStyle := t.Renderer.NewStyle().Foreground(t.Primary)
 		promptStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
@@ -68,7 +69,9 @@ func (m *LensDashboardModel) View() string {
 		inputLine := promptStyle.Render("+ Scope: ") + inputStyle.Render(m.scopeInput) + inputStyle.Render("█")
 		lines = append(lines, inputLine)
 
-		// Show matching labels on separate line to avoid breaking layout
+		// Show matching labels on second line, or empty line if no matches
+		// This ensures exactly 2 lines are output to match calculateViewport()
+		var matchLine string
 		if m.scopeInput != "" {
 			query := strings.ToLower(m.scopeInput)
 			var matches []string
@@ -87,9 +90,10 @@ func (m *LensDashboardModel) View() string {
 				if maxLen > 0 && len(matchText) > maxLen {
 					matchText = matchText[:maxLen-3] + "..."
 				}
-				lines = append(lines, hintStyle.Render("  → "+matchText))
+				matchLine = hintStyle.Render("  → " + matchText)
 			}
 		}
+		lines = append(lines, matchLine) // Always add second line (empty if no matches)
 	}
 
 	// Fuzzy search input (inline, filters the list below)
@@ -1416,13 +1420,13 @@ func (m *LensDashboardModel) renderKeybindBar() string {
 	var modeNav string
 	switch {
 	case m.viewType == ViewTypeWorkstream && len(m.workstreams) > 1:
-		modeNav = k("n/N", "stream") + " " + k("T", "tree") + " " + k("z/Z", "expand/collapse")
+		modeNav = k("[/]", "stream") + " " + k("T", "tree") + " " + k("z/Z", "expand/collapse")
 	case m.viewType == ViewTypeGrouped && len(m.groupedSections) > 0:
-		modeNav = k("n/N", "group") + " " + k("T", "tree") + " " + k("z/Z", "expand/collapse")
+		modeNav = k("[/]", "group") + " " + k("T", "tree") + " " + k("z/Z", "expand/collapse")
 	case m.viewMode == "epic" || m.viewMode == "bead":
 		modeNav = "" // Centered mode has no extra nav
 	default:
-		modeNav = k("n/N", "section")
+		modeNav = k("[/]", "section")
 	}
 
 	// External views (only in flat view)

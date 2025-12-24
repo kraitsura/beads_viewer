@@ -99,6 +99,9 @@ func (m *LensDashboardModel) calculateViewport() ViewportConfig {
 	if m.showScopeInput {
 		headerLines += 2
 	}
+	if m.showFuzzySearch {
+		headerLines++
+	}
 
 	contentHeight := m.height - headerLines - lensKeybindBarLines
 	if contentHeight < lensMinContentHeight {

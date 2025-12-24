@@ -325,8 +325,9 @@ func TestLensDashboardViewOutputChanges(t *testing.T) {
 
 	// If there are multiple workstreams, the view should show workstream info
 	if wsCount > 1 {
-		if !strings.Contains(workstreamView, "streams]") {
-			t.Errorf("With %d workstreams and ViewTypeWorkstream, view should show 'streams]', got:\n%s", wsCount, workstreamView)
+		// Check for workstream indicator in keybind bar (format: "streams:N")
+		if !strings.Contains(workstreamView, "streams:") {
+			t.Errorf("With %d workstreams and ViewTypeWorkstream, view should show 'streams:', got:\n%s", wsCount, workstreamView)
 		}
 		if strings.Contains(workstreamView, "[flat view]") {
 			t.Errorf("In workstream mode with multiple workstreams, should not show '[flat view]', got:\n%s", workstreamView)
@@ -542,6 +543,73 @@ func TestEpicDashboardDepthBehavior(t *testing.T) {
 	// Depth1 should include: epic + child1, child2 (3 issues: entry + 2 direct children)
 	if depth1Primary != 3 {
 		t.Errorf("At Depth1, expected 3 primary issues (epic + 2 direct children), got %d", depth1Primary)
+	}
+}
+
+func TestLensDashboardViewHeightMatchesExpected(t *testing.T) {
+	// Test that the View() output has exactly the expected number of lines
+	// based on the height set via SetSize()
+	issues := []model.Issue{
+		{ID: "ready1", Status: model.StatusOpen, Labels: []string{"test", "ui"}},
+		{ID: "ready2", Status: model.StatusOpen, Labels: []string{"test"}},
+		{ID: "blocked1", Status: model.StatusBlocked, Labels: []string{"test"}},
+		{ID: "closed1", Status: model.StatusClosed, Labels: []string{"test"}},
+	}
+	issueMap := make(map[string]*model.Issue)
+	for i := range issues {
+		issueMap[issues[i].ID] = &issues[i]
+	}
+
+	renderer := lipgloss.DefaultRenderer()
+	theme := DefaultTheme(renderer)
+
+	testCases := []struct {
+		name         string
+		height       int
+		withFuzzy    bool
+		withScope    bool
+		withInput    bool
+	}{
+		{"base-small", 20, false, false, false},
+		{"base-medium", 40, false, false, false},
+		{"base-large", 60, false, false, false},
+		{"fuzzy-search", 40, true, false, false},
+		{"scope-labels", 40, false, true, false},
+		{"scope-input", 40, false, false, true},
+		{"all-features", 40, true, true, true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dashboard := NewLensDashboardModel("test", issues, issueMap, theme)
+			dashboard.SetSize(80, tc.height)
+
+			// Enable features as needed
+			if tc.withFuzzy {
+				dashboard.OpenFuzzySearch()
+			}
+			if tc.withScope {
+				dashboard.AddScopeLabel("ui")
+			}
+			if tc.withInput {
+				dashboard.OpenScopeInput()
+			}
+
+			view := dashboard.View()
+			actualLines := strings.Count(view, "\n") + 1
+
+			// The view should output exactly tc.height lines
+			if actualLines != tc.height {
+				t.Errorf("height=%d: expected %d lines, got %d (diff: %d)",
+					tc.height, tc.height, actualLines, actualLines-tc.height)
+
+				// Debug: show calculated viewport
+				vp := dashboard.calculateViewport()
+				t.Logf("  calculateViewport: headerLines=%d, contentHeight=%d, footerLines=%d, sum=%d",
+					vp.HeaderLines, vp.ContentHeight, vp.FooterLines,
+					vp.HeaderLines+vp.ContentHeight+vp.FooterLines)
+			}
+		})
 	}
 }
 
