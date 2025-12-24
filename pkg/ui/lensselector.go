@@ -49,8 +49,9 @@ type LensSelectorModel struct {
 	searchMode string // "merged", "epic", "label", "bead"
 
 	// Scope state (multi-scope filtering)
-	scopeLabels []string // Currently set scope labels (empty = no scope)
-	scopeMode   bool     // True when in scope mode
+	scopeLabels    []string  // Currently set scope labels (empty = no scope)
+	scopeMode      bool      // True when in scope mode
+	scopeMatchMode ScopeMode // Union (ANY) or Intersection (ALL) for multi-label scoping
 
 	// Mode state (vim-style)
 	insertMode      bool // True when in insert mode (typing into search)
@@ -335,6 +336,12 @@ func (m *LensSelectorModel) updateNormalMode(key string) bool {
 	case "down", "j":
 		m.moveDown()
 		return true
+	case "u":
+		m.moveUpJump(5)
+		return true
+	case "d":
+		m.moveDownJump(5)
+		return true
 	case "i", "/":
 		// Enter insert mode (for searching)
 		m.insertMode = true
@@ -344,6 +351,18 @@ func (m *LensSelectorModel) updateNormalMode(key string) bool {
 		// Enter insert mode for scope adding
 		m.insertMode = true
 		m.scopeAddMode = true
+		return true
+	case "S":
+		// Toggle scope match mode between union (ANY) and intersection (ALL)
+		// Only meaningful with 2+ scope labels
+		if m.scopeMode && len(m.scopeLabels) >= 2 {
+			if m.scopeMatchMode == ScopeModeUnion {
+				m.scopeMatchMode = ScopeModeIntersection
+			} else {
+				m.scopeMatchMode = ScopeModeUnion
+			}
+			m.filterByScope()
+		}
 		return true
 	case "m":
 		// Cycle search mode: merged -> epic -> label -> bead -> merged
@@ -455,30 +474,82 @@ func (m *LensSelectorModel) moveDown() {
 	}
 }
 
+func (m *LensSelectorModel) moveUpJump(n int) {
+	m.selectedIndex -= n
+	if m.selectedIndex < 0 {
+		m.selectedIndex = 0
+	}
+	m.hasNavigated = true
+}
+
+func (m *LensSelectorModel) moveDownJump(n int) {
+	m.selectedIndex += n
+	if m.selectedIndex >= len(m.filteredItems) {
+		m.selectedIndex = len(m.filteredItems) - 1
+	}
+	if m.selectedIndex < 0 {
+		m.selectedIndex = 0
+	}
+	m.hasNavigated = true
+}
+
 func (m *LensSelectorModel) filterItems() {
 	query := strings.TrimSpace(m.searchInput.Value())
 
-	if query == "" {
-		// No search query - rebuild based on mode
-		m.rebuildFilteredItems()
+	// Special case: scopeAddMode always searches labels (for adding to scope)
+	if m.scopeAddMode {
+		if query == "" {
+			m.filteredItems = append([]LensItem{}, m.allLabels...)
+			m.selectedIndex = 0
+			return
+		}
+		// Search all labels
+		searchStrings := make([]string, len(m.allLabels))
+		for i, item := range m.allLabels {
+			searchStrings[i] = item.Title + " " + item.Value
+		}
+		matches := fuzzy.Find(query, searchStrings)
+		m.filteredItems = make([]LensItem, 0, len(matches))
+		for _, match := range matches {
+			m.filteredItems = append(m.filteredItems, m.allLabels[match.Index])
+		}
 		m.selectedIndex = 0
 		return
 	}
 
-	// Get source items based on search mode
+	if query == "" {
+		// No search query - rebuild based on mode, respecting scope
+		if m.scopeMode && len(m.scopeLabels) > 0 {
+			m.filterByScope()
+		} else {
+			m.rebuildFilteredItems()
+		}
+		m.selectedIndex = 0
+		return
+	}
+
+	// Get source items based on search mode, respecting scope
 	var sourceItems []LensItem
-	switch m.searchMode {
-	case "epic":
-		sourceItems = m.allEpics
-	case "label":
-		sourceItems = m.allLabels
-	case "bead":
-		sourceItems = m.allBeads
-	default: // merged
-		// In merged mode with search: include beads too
-		sourceItems = append([]LensItem{}, m.allEpics...)
-		sourceItems = append(sourceItems, m.allLabels...)
-		sourceItems = append(sourceItems, m.allBeads...)
+
+	if m.scopeMode && len(m.scopeLabels) > 0 {
+		// When in scope mode, search only within scoped items
+		// First compute the scoped items, then we'll search within them
+		sourceItems = m.getScopedSourceItems()
+	} else {
+		// Normal mode: get items based on search mode
+		switch m.searchMode {
+		case "epic":
+			sourceItems = m.allEpics
+		case "label":
+			sourceItems = m.allLabels
+		case "bead":
+			sourceItems = m.allBeads
+		default: // merged
+			// In merged mode with search: include beads too
+			sourceItems = append([]LensItem{}, m.allEpics...)
+			sourceItems = append(sourceItems, m.allLabels...)
+			sourceItems = append(sourceItems, m.allBeads...)
+		}
 	}
 
 	// Build searchable strings
@@ -497,6 +568,124 @@ func (m *LensSelectorModel) filterItems() {
 
 	// Reset selection to top
 	m.selectedIndex = 0
+}
+
+// getScopedSourceItems returns items filtered by the current scope labels.
+// This is used when searching within scope mode to ensure search respects scope.
+// Uses scopeMatchMode to determine if issues need ALL (intersection) or ANY (union) scope labels.
+func (m *LensSelectorModel) getScopedSourceItems() []LensItem {
+	if len(m.scopeLabels) == 0 {
+		// No scope, return based on search mode
+		switch m.searchMode {
+		case "epic":
+			return m.allEpics
+		case "label":
+			return m.allLabels
+		case "bead":
+			return m.allBeads
+		default:
+			result := append([]LensItem{}, m.allEpics...)
+			result = append(result, m.allLabels...)
+			return result
+		}
+	}
+
+	// Build set of scope labels for quick lookup
+	scopeSet := make(map[string]bool)
+	for _, l := range m.scopeLabels {
+		scopeSet[l] = true
+	}
+
+	// Find all issues that match the scope criteria (using scopeMatchMode)
+	scopeIssues := make(map[string]bool)
+	for _, issue := range m.issues {
+		if m.issueMatchesScope(issue) {
+			scopeIssues[issue.ID] = true
+		}
+	}
+
+	// Count co-occurring labels (excluding scope labels)
+	labelOverlap := make(map[string]int)
+	for _, issue := range m.issues {
+		if !scopeIssues[issue.ID] {
+			continue
+		}
+		for _, label := range issue.Labels {
+			if !scopeSet[label] {
+				labelOverlap[label]++
+			}
+		}
+	}
+
+	// Build items with overlap counts based on search mode
+	var result []LensItem
+
+	switch m.searchMode {
+	case "label":
+		// Return labels that co-occur with scope
+		for _, item := range m.allLabels {
+			if !scopeSet[item.Value] {
+				if overlap, ok := labelOverlap[item.Value]; ok && overlap > 0 {
+					itemCopy := item
+					itemCopy.OverlapCount = overlap
+					result = append(result, itemCopy)
+				}
+			}
+		}
+	case "epic":
+		// Return epics that have descendants matching scope
+		childrenMap := BuildChildrenMap(m.issues)
+		for _, item := range m.allEpics {
+			overlapCount := countScopedDescendants(item.Value, childrenMap, scopeIssues)
+			if overlapCount > 0 {
+				itemCopy := item
+				itemCopy.OverlapCount = overlapCount
+				result = append(result, itemCopy)
+			}
+		}
+	case "bead":
+		// Return beads that match scope criteria
+		for _, item := range m.allBeads {
+			if scopeIssues[item.Value] {
+				result = append(result, item)
+			}
+		}
+	default: // "merged" - return ALL types: beads, epics, and labels
+		// Build children map for epic descendant counting
+		childrenMap := BuildChildrenMap(m.issues)
+
+		// 1. Add matching beads
+		for _, item := range m.allBeads {
+			if scopeIssues[item.Value] {
+				itemCopy := item
+				itemCopy.OverlapCount = 1
+				result = append(result, itemCopy)
+			}
+		}
+
+		// 2. Add matching epics (with scoped descendant counts)
+		for _, item := range m.allEpics {
+			overlapCount := countScopedDescendants(item.Value, childrenMap, scopeIssues)
+			if overlapCount > 0 {
+				itemCopy := item
+				itemCopy.OverlapCount = overlapCount
+				result = append(result, itemCopy)
+			}
+		}
+
+		// 3. Add co-occurring labels with overlap counts
+		for _, item := range m.allLabels {
+			if !scopeSet[item.Value] {
+				if overlap, ok := labelOverlap[item.Value]; ok && overlap > 0 {
+					itemCopy := item
+					itemCopy.OverlapCount = overlap
+					result = append(result, itemCopy)
+				}
+			}
+		}
+	}
+
+	return result
 }
 
 // IsConfirmed returns true if user confirmed a selection
@@ -582,13 +771,72 @@ func (m *LensSelectorModel) toggleScope(label string) {
 func (m *LensSelectorModel) clearScope() {
 	m.scopeLabels = nil
 	m.scopeMode = false
+	m.scopeMatchMode = ScopeModeIntersection // Reset to default (ALL)
 	m.scopedLabels = nil
 	m.searchInput.SetValue("")
 	m.rebuildFilteredItems()
 	m.selectedIndex = 0
 }
 
-// filterByScope filters to show only labels that co-occur with ALL scope labels
+// ScopeMatchMode returns the current scope match mode (union or intersection)
+func (m *LensSelectorModel) ScopeMatchMode() ScopeMode {
+	return m.scopeMatchMode
+}
+
+// issueMatchesScope returns true if the issue matches the current scope criteria.
+// In Union mode, returns true if the issue has ANY of the scope labels.
+// In Intersection mode (default), returns true if the issue has ALL scope labels.
+func (m *LensSelectorModel) issueMatchesScope(issue model.Issue) bool {
+	if len(m.scopeLabels) == 0 {
+		return true
+	}
+
+	// Build set of issue's labels for quick lookup
+	issueLabels := make(map[string]bool)
+	for _, label := range issue.Labels {
+		issueLabels[label] = true
+	}
+
+	if m.scopeMatchMode == ScopeModeUnion {
+		// Union: issue has ANY of the scope labels
+		for _, scopeLabel := range m.scopeLabels {
+			if issueLabels[scopeLabel] {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Intersection (default): issue has ALL of the scope labels
+	for _, scopeLabel := range m.scopeLabels {
+		if !issueLabels[scopeLabel] {
+			return false
+		}
+	}
+	return true
+}
+
+// countScopedDescendants counts how many descendants of an epic match the scope
+func countScopedDescendants(epicID string, children map[string][]string, scopeIssues map[string]bool) int {
+	count := 0
+	var visit func(id string)
+	visit = func(id string) {
+		for _, childID := range children[id] {
+			if scopeIssues[childID] {
+				count++
+			}
+			visit(childID)
+		}
+	}
+	visit(epicID)
+	return count
+}
+
+// filterByScope filters items to respect current scope labels and search mode.
+// Uses scopeMatchMode to determine if issues need ALL (intersection) or ANY (union) scope labels.
+// For merged mode: shows beads, epics, and labels sorted by overlap count.
+// For label mode: shows only co-occurring labels with overlap counts.
+// For epic/bead modes: shows items that match the scope criteria.
 func (m *LensSelectorModel) filterByScope() {
 	if len(m.scopeLabels) == 0 {
 		m.rebuildFilteredItems()
@@ -601,57 +849,116 @@ func (m *LensSelectorModel) filterByScope() {
 		scopeSet[l] = true
 	}
 
-	// Find all issues that have ALL scope labels
+	// Find all issues that match the scope criteria (using scopeMatchMode)
 	scopeIssues := make(map[string]bool)
 	for _, issue := range m.issues {
-		hasAll := true
-		for _, scopeLabel := range m.scopeLabels {
-			found := false
-			for _, label := range issue.Labels {
-				if label == scopeLabel {
-					found = true
-					break
-				}
-			}
-			if !found {
-				hasAll = false
-				break
-			}
-		}
-		if hasAll {
+		if m.issueMatchesScope(issue) {
 			scopeIssues[issue.ID] = true
 		}
 	}
 
-	// Count co-occurring labels (excluding scope labels)
-	labelOverlap := make(map[string]int)
-	for _, issue := range m.issues {
-		if !scopeIssues[issue.ID] {
-			continue
-		}
-		for _, label := range issue.Labels {
-			if !scopeSet[label] {
-				labelOverlap[label]++
-			}
-		}
-	}
-
-	// Build filtered items with overlap counts (using allLabels)
 	var filtered []LensItem
-	for _, item := range m.allLabels {
-		if !scopeSet[item.Value] {
-			if overlap, ok := labelOverlap[item.Value]; ok && overlap > 0 {
+
+	switch m.searchMode {
+	case "epic":
+		// Show epics that have descendants matching scope
+		childrenMap := BuildChildrenMap(m.issues)
+		for _, item := range m.allEpics {
+			overlapCount := countScopedDescendants(item.Value, childrenMap, scopeIssues)
+			if overlapCount > 0 {
 				itemCopy := item
-				itemCopy.OverlapCount = overlap
+				itemCopy.OverlapCount = overlapCount
 				filtered = append(filtered, itemCopy)
 			}
 		}
-	}
+	case "bead":
+		// Show beads that match scope criteria
+		for _, item := range m.allBeads {
+			if scopeIssues[item.Value] {
+				filtered = append(filtered, item)
+			}
+		}
+	case "label":
+		// Count co-occurring labels (excluding scope labels)
+		labelOverlap := make(map[string]int)
+		for _, issue := range m.issues {
+			if !scopeIssues[issue.ID] {
+				continue
+			}
+			for _, label := range issue.Labels {
+				if !scopeSet[label] {
+					labelOverlap[label]++
+				}
+			}
+		}
 
-	// Sort by overlap count (descending)
-	sort.Slice(filtered, func(i, j int) bool {
-		return filtered[i].OverlapCount > filtered[j].OverlapCount
-	})
+		// Build filtered items with overlap counts (labels only)
+		for _, item := range m.allLabels {
+			if !scopeSet[item.Value] {
+				if overlap, ok := labelOverlap[item.Value]; ok && overlap > 0 {
+					itemCopy := item
+					itemCopy.OverlapCount = overlap
+					filtered = append(filtered, itemCopy)
+				}
+			}
+		}
+
+		// Sort by overlap count (descending)
+		sort.Slice(filtered, func(i, j int) bool {
+			return filtered[i].OverlapCount > filtered[j].OverlapCount
+		})
+	default: // "merged" - show ALL types: beads, epics, and labels
+		// Count co-occurring labels (excluding scope labels)
+		labelOverlap := make(map[string]int)
+		for _, issue := range m.issues {
+			if !scopeIssues[issue.ID] {
+				continue
+			}
+			for _, label := range issue.Labels {
+				if !scopeSet[label] {
+					labelOverlap[label]++
+				}
+			}
+		}
+
+		// Build children map for epic descendant counting
+		childrenMap := BuildChildrenMap(m.issues)
+
+		// 1. Add matching beads
+		for _, item := range m.allBeads {
+			if scopeIssues[item.Value] {
+				itemCopy := item
+				itemCopy.OverlapCount = 1
+				filtered = append(filtered, itemCopy)
+			}
+		}
+
+		// 2. Add matching epics (with scoped descendant counts)
+		for _, item := range m.allEpics {
+			overlapCount := countScopedDescendants(item.Value, childrenMap, scopeIssues)
+			if overlapCount > 0 {
+				itemCopy := item
+				itemCopy.OverlapCount = overlapCount
+				filtered = append(filtered, itemCopy)
+			}
+		}
+
+		// 3. Add co-occurring labels with overlap counts
+		for _, item := range m.allLabels {
+			if !scopeSet[item.Value] {
+				if overlap, ok := labelOverlap[item.Value]; ok && overlap > 0 {
+					itemCopy := item
+					itemCopy.OverlapCount = overlap
+					filtered = append(filtered, itemCopy)
+				}
+			}
+		}
+
+		// Sort ALL items by overlap count (highest first), regardless of type
+		sort.Slice(filtered, func(i, j int) bool {
+			return filtered[i].OverlapCount > filtered[j].OverlapCount
+		})
+	}
 
 	m.filteredItems = filtered
 	m.selectedIndex = 0
@@ -664,6 +971,7 @@ func (m *LensSelectorModel) Reset() {
 	m.scopedLabels = nil
 	m.scopeLabels = nil
 	m.scopeMode = false
+	m.scopeMatchMode = ScopeModeIntersection // Reset to default (ALL)
 	m.searchInput.SetValue("")
 	m.searchMode = "merged"
 	m.rebuildFilteredItems()
@@ -1189,9 +1497,26 @@ func (m *LensSelectorModel) renderKeybindFooter(width int) string {
 		}
 	} else if m.scopeMode {
 		mode := modeStyle.Render("FILTERED")
-		line = mode + "  " +
+
+		// Only show scope match mode indicator when 2+ labels (meaningless with 1)
+		var matchModeIndicator string
+		var toggleHint string
+		if len(m.scopeLabels) >= 2 {
+			matchModeStyle := t.Renderer.NewStyle().Foreground(t.Secondary).Bold(true)
+			matchModeIndicator = " " + matchModeStyle.Render(m.scopeMatchMode.ShortString())
+			// Show what mode Shift+S will toggle to
+			if m.scopeMatchMode == ScopeModeUnion {
+				toggleHint = keyStyle.Render("S") + descStyle.Render(" →all") + sep
+			} else {
+				toggleHint = keyStyle.Render("S") + descStyle.Render(" →any") + sep
+			}
+		}
+
+		line = mode + matchModeIndicator + "  " +
 			keyStyle.Render("j/k") + descStyle.Render(" nav") + sep +
+			toggleHint +
 			keyStyle.Render("s") + descStyle.Render(" +scope") + sep +
+			keyStyle.Render("m") + descStyle.Render(" mode") + sep +
 			keyStyle.Render("⌫") + descStyle.Render(" clear") + sep +
 			keyStyle.Render("⏎") + descStyle.Render(" select") + sep +
 			keyStyle.Render("q") + descStyle.Render(" exit")

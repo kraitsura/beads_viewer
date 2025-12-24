@@ -87,6 +87,9 @@ type ReviewDashboardModel struct {
 	// Review persistence
 	collector     *review.ReviewActionCollector
 	workspaceRoot string
+
+	// Review notes stored separately from issue.Notes to avoid conflicts
+	reviewNotes map[string]string // issue ID -> review notes
 }
 
 // NewReviewDashboardModel creates a new review dashboard
@@ -105,6 +108,7 @@ func NewReviewDashboardModel(rootID string, issues []model.Issue, reviewer strin
 		sessionStarted: time.Now(),
 		collector:      review.NewReviewActionCollector(reviewer, reviewType),
 		workspaceRoot:  workspaceRoot,
+		reviewNotes:    make(map[string]string),
 	}
 
 	m.rebuildFlatNodes()
@@ -409,13 +413,9 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 				note := m.noteInput.Notes()
 				action := m.noteInput.Action()
 
-				// Append note to existing notes
-				if note != "" {
-					if issue.Notes != "" {
-						issue.Notes = issue.Notes + "\n\n---\n\n" + note
-					} else {
-						issue.Notes = note
-					}
+				// Store review notes separately for display
+				if note != "" && (action == "revision" || action == "defer") {
+					m.reviewNotes[issue.ID] = note
 				}
 
 				// Set review status based on action
@@ -491,6 +491,47 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 		case "G", "end":
 			m.cursor = len(m.flatNodes) - 1
 			m.ensureVisible()
+		case "ctrl+u":
+			// Page up (half page)
+			if m.detailFocus {
+				pageSize := (m.height - 10) / 2
+				if pageSize < 1 {
+					pageSize = 5
+				}
+				m.detailScroll -= pageSize
+				if m.detailScroll < 0 {
+					m.detailScroll = 0
+				}
+			} else {
+				pageSize := (m.height - 10) / 2
+				if pageSize < 1 {
+					pageSize = 5
+				}
+				m.cursor -= pageSize
+				if m.cursor < 0 {
+					m.cursor = 0
+				}
+				m.ensureVisible()
+			}
+		case "ctrl+d":
+			// Page down (half page)
+			if m.detailFocus {
+				pageSize := (m.height - 10) / 2
+				if pageSize < 1 {
+					pageSize = 5
+				}
+				m.detailScroll += pageSize
+			} else {
+				pageSize := (m.height - 10) / 2
+				if pageSize < 1 {
+					pageSize = 5
+				}
+				m.cursor += pageSize
+				if m.cursor >= len(m.flatNodes) {
+					m.cursor = len(m.flatNodes) - 1
+				}
+				m.ensureVisible()
+			}
 		case "f":
 			m.cycleFilter()
 		case "tab":
@@ -539,6 +580,31 @@ func (m *ReviewDashboardModel) Update(msg tea.Msg) (*ReviewDashboardModel, tea.C
 				m.noteInput.SetSize(m.width, m.height)
 				m.showNoteInput = true
 				return m, m.noteInput.Init()
+			}
+		case "u":
+			// Unapprove - reset review status to unreviewed
+			if issue := m.SelectedIssue(); issue != nil {
+				// Only count if it was previously reviewed
+				wasReviewed := issue.ReviewStatus != "" && issue.ReviewStatus != model.ReviewStatusUnreviewed
+				if wasReviewed {
+					// Decrement the appropriate counter
+					switch issue.ReviewStatus {
+					case model.ReviewStatusApproved:
+						m.itemsApproved--
+					case model.ReviewStatusNeedsRevision:
+						m.itemsNeedsRevision--
+					case model.ReviewStatusDeferred:
+						m.itemsDeferred--
+					}
+					m.itemsReviewed--
+				}
+				issue.ReviewStatus = model.ReviewStatusUnreviewed
+				issue.ReviewedBy = ""
+				issue.ReviewedAt = time.Time{}
+				// Clear review notes
+				delete(m.reviewNotes, issue.ID)
+				// Record for persistence (empty status = unreviewed)
+				m.collector.Record(issue.ID, model.ReviewStatusUnreviewed, "")
 			}
 		case "?":
 			m.showHelp = true
@@ -797,6 +863,7 @@ func (m *ReviewDashboardModel) renderHelp() string {
 	b.WriteString(sectionStyle.Render("Navigation") + "\n")
 	b.WriteString(keyStyle.Render("  j/k, ↑/↓") + descStyle.Render("   Move cursor / scroll detail") + "\n")
 	b.WriteString(keyStyle.Render("  g/G") + descStyle.Render("        Go to first/last item") + "\n")
+	b.WriteString(keyStyle.Render("  Ctrl+u/d") + descStyle.Render("   Page up/down (half page)") + "\n")
 	b.WriteString(keyStyle.Render("  [/]") + descStyle.Render("        Jump to prev/next unreviewed") + "\n")
 	b.WriteString(keyStyle.Render("  Tab") + descStyle.Render("        Switch focus: tree ↔ detail") + "\n")
 	b.WriteString(keyStyle.Render("  /") + descStyle.Render("          Search issues") + "\n\n")
@@ -806,6 +873,7 @@ func (m *ReviewDashboardModel) renderHelp() string {
 	b.WriteString(keyStyle.Render("  a") + descStyle.Render("          Approve current item") + "\n")
 	b.WriteString(keyStyle.Render("  r") + descStyle.Render("          Request revision (+ note)") + "\n")
 	b.WriteString(keyStyle.Render("  d") + descStyle.Render("          Defer review (+ note)") + "\n")
+	b.WriteString(keyStyle.Render("  u") + descStyle.Render("          Unapprove (reset to unreviewed)") + "\n")
 	b.WriteString(keyStyle.Render("  n") + descStyle.Render("          Add note (no status change)") + "\n")
 	b.WriteString(keyStyle.Render("  A") + descStyle.Render("          Assign to reviewer") + "\n\n")
 
@@ -1167,7 +1235,7 @@ func (m *ReviewDashboardModel) renderSplitView() string {
 		tagStyle := m.theme.Renderer.NewStyle().Foreground(m.theme.Secondary)
 		output.WriteString("  ")
 		for _, l := range m.activeLabels {
-			output.WriteString(tagStyle.Render("⬡"+l) + " ")
+			output.WriteString(tagStyle.Render("⬡ "+l) + " ")
 		}
 	}
 	output.WriteString("\n")
@@ -1244,8 +1312,7 @@ func (m *ReviewDashboardModel) renderSplitView() string {
 	output.WriteString(keyStyle.Render("a") + hintStyle.Render("pprove "))
 	output.WriteString(keyStyle.Render("r") + hintStyle.Render("evise "))
 	output.WriteString(keyStyle.Render("d") + hintStyle.Render("efer "))
-	output.WriteString(keyStyle.Render("/") + hintStyle.Render("search "))
-	output.WriteString(keyStyle.Render("l") + hintStyle.Render("abel "))
+	output.WriteString(keyStyle.Render("u") + hintStyle.Render("napprove "))
 	output.WriteString(keyStyle.Render("?") + hintStyle.Render("help "))
 	output.WriteString(keyStyle.Render("q") + hintStyle.Render("uit"))
 
@@ -1381,6 +1448,15 @@ func (m *ReviewDashboardModel) renderDetailPanelFixed(width, height int) string 
 		reviewStyle = m.theme.Renderer.NewStyle().Foreground(m.theme.Subtext)
 	}
 	lines = append(lines, reviewStyle.Render("Review: "+strings.ToUpper(reviewStatus)))
+
+	// Review notes (from comment-based persistence)
+	if notes, ok := m.reviewNotes[issue.ID]; ok && notes != "" {
+		notesStyle := m.theme.Renderer.NewStyle().Foreground(m.theme.Subtext).Italic(true)
+		notesLines := wrapTextLines(notes, width-4)
+		for _, nl := range notesLines {
+			lines = append(lines, notesStyle.Render("  "+nl))
+		}
+	}
 	lines = append(lines, "")
 
 	// Description
@@ -1706,6 +1782,11 @@ func (m *ReviewDashboardModel) ShouldSave() bool {
 	return m.saveOnQuit
 }
 
+// IsQuitting returns true if the user has requested to quit
+func (m *ReviewDashboardModel) IsQuitting() bool {
+	return m.quitting
+}
+
 // SaveReviews persists all collected review actions to beads
 func (m *ReviewDashboardModel) SaveReviews() *review.ReviewSaveResult {
 	if m.collector.Count() == 0 {
@@ -1744,18 +1825,27 @@ func (m *ReviewDashboardModel) loadIssueReviewState(issue *model.Issue) {
 		return
 	}
 
-	// Collect comment texts
-	commentTexts := make([]string, len(issue.Comments))
-	for i, c := range issue.Comments {
-		commentTexts[i] = c.Text
+	// Find the latest review comment, capturing notes
+	var latestTime time.Time
+	var latestStatus, latestReviewer, latestNotes string
+
+	for _, c := range issue.Comments {
+		status, reviewer, reviewedAt, notes, ok := review.ParseReviewFromComment(c.Text)
+		if ok && (reviewedAt.After(latestTime) || latestTime.IsZero()) {
+			latestStatus = status
+			latestReviewer = reviewer
+			latestTime = reviewedAt
+			latestNotes = notes
+		}
 	}
 
-	// Parse to find latest review
-	status, reviewer, reviewedAt, found := review.GetLatestReviewFromComments(commentTexts)
-	if found {
-		issue.ReviewStatus = status
-		issue.ReviewedBy = reviewer
-		issue.ReviewedAt = reviewedAt
+	if latestStatus != "" {
+		issue.ReviewStatus = latestStatus
+		issue.ReviewedBy = latestReviewer
+		issue.ReviewedAt = latestTime
+		if latestNotes != "" {
+			m.reviewNotes[issue.ID] = latestNotes
+		}
 	}
 }
 
@@ -1815,6 +1905,11 @@ func (m *ReviewDashboardModel) generateFullPrompt() string {
 	b.WriteString("You are reviewing a beads issue tracking session. ")
 	b.WriteString("Go over the review feedback and suggest changes.\n\n")
 
+	// Root context
+	b.WriteString(fmt.Sprintf("**Review Root:** `%s` - %s\n", m.tree.Root.ID, m.tree.Root.Title))
+	b.WriteString(fmt.Sprintf("**Review Type:** %s\n", m.reviewType))
+	b.WriteString(fmt.Sprintf("**Reviewer:** %s\n\n", m.reviewer))
+
 	// Count by status
 	approved, revision, deferred := 0, 0, 0
 	for _, a := range actions {
@@ -1850,9 +1945,9 @@ func (m *ReviewDashboardModel) generateFullPrompt() string {
 		b.WriteString("\n")
 	}
 
-	// Issues needing revision (detailed with notes)
+	// Issues needing revision (detailed with full context)
 	if revision > 0 {
-		b.WriteString("## Issues Needing Revision\n")
+		b.WriteString("## Issues Needing Revision\n\n")
 		for _, a := range actions {
 			if a.Status == model.ReviewStatusNeedsRevision {
 				issue := m.findIssueByID(a.IssueID)
@@ -1860,18 +1955,68 @@ func (m *ReviewDashboardModel) generateFullPrompt() string {
 				if issue != nil {
 					title = issue.Title
 				}
-				b.WriteString(fmt.Sprintf("### `%s`: %s\n", a.IssueID, title))
+				b.WriteString(fmt.Sprintf("### `%s`: %s\n\n", a.IssueID, title))
+
+				// Review feedback (most important)
 				if a.Notes != "" {
-					b.WriteString(fmt.Sprintf("**Review Notes:** %s\n", a.Notes))
+					b.WriteString(fmt.Sprintf("**Review Feedback:** %s\n\n", a.Notes))
 				}
-				b.WriteString("**Action Required:** Review feedback and suggest implementation changes.\n\n")
+
+				// Include full issue context if available
+				if issue != nil {
+					// Labels for context
+					if len(issue.Labels) > 0 {
+						b.WriteString(fmt.Sprintf("**Labels:** %s\n", strings.Join(issue.Labels, ", ")))
+					}
+
+					// Status and type
+					b.WriteString(fmt.Sprintf("**Status:** %s | **Type:** %s | **Priority:** P%d\n\n", issue.Status, issue.IssueType, issue.Priority))
+
+					// Description
+					if issue.Description != "" {
+						b.WriteString("**Description:**\n")
+						b.WriteString(issue.Description + "\n\n")
+					}
+
+					// Design notes
+					if issue.Design != "" {
+						b.WriteString("**Design Notes:**\n")
+						b.WriteString(issue.Design + "\n\n")
+					}
+
+					// Acceptance criteria
+					if issue.AcceptanceCriteria != "" {
+						b.WriteString("**Acceptance Criteria:**\n")
+						b.WriteString(issue.AcceptanceCriteria + "\n\n")
+					}
+
+					// Issue notes (existing notes on the issue)
+					if issue.Notes != "" {
+						b.WriteString("**Issue Notes:**\n")
+						b.WriteString(issue.Notes + "\n\n")
+					}
+
+					// Existing comments (excluding review markers for readability)
+					if len(issue.Comments) > 0 {
+						nonReviewComments := m.filterNonReviewComments(issue.Comments)
+						if len(nonReviewComments) > 0 {
+							b.WriteString("**Previous Comments:**\n")
+							for _, c := range nonReviewComments {
+								b.WriteString(fmt.Sprintf("- [%s] %s: %s\n", c.CreatedAt.Format("01/02"), c.Author, c.Text))
+							}
+							b.WriteString("\n")
+						}
+					}
+				}
+
+				b.WriteString("---\n\n")
 			}
 		}
 	}
 
 	// Deferred issues (with reason if provided)
 	if deferred > 0 {
-		b.WriteString("## Deferred Issues\n")
+		b.WriteString("## Deferred Issues\n\n")
 		for _, a := range actions {
 			if a.Status == model.ReviewStatusDeferred {
 				issue := m.findIssueByID(a.IssueID)
@@ -1881,22 +2026,45 @@ func (m *ReviewDashboardModel) generateFullPrompt() string {
 				}
 				b.WriteString(fmt.Sprintf("### `%s`: %s\n", a.IssueID, title))
 				if a.Notes != "" {
-					b.WriteString(fmt.Sprintf("**Reason:** %s\n\n", a.Notes))
-				} else {
-					b.WriteString("\n")
+					b.WriteString(fmt.Sprintf("**Reason:** %s\n", a.Notes))
 				}
+				// Brief context for deferred items
+				if issue != nil && issue.Description != "" {
+					desc := issue.Description
+					if len(desc) > 200 {
+						desc = desc[:197] + "..."
+					}
+					b.WriteString(fmt.Sprintf("**Context:** %s\n", desc))
+				}
+				b.WriteString("\n")
 			}
 		}
 	}
 
 	// Instructions footer
 	b.WriteString("---\n\n")
-	b.WriteString("For each issue with review feedback:\n")
-	b.WriteString("1. Analyze the review notes\n")
-	b.WriteString("2. Suggest concrete changes based on feedback\n")
-	b.WriteString("3. Explain current bead state and dependencies\n")
+	b.WriteString("## Instructions\n\n")
+	b.WriteString("For each issue marked **Needs Revision**:\n")
+	b.WriteString("1. Review the feedback and understand what changes are requested\n")
+	b.WriteString("2. Consider the description, design notes, and acceptance criteria\n")
+	b.WriteString("3. Check any previous comments for additional context\n")
+	b.WriteString("4. Suggest concrete changes to address the review feedback\n")
+	b.WriteString("5. Update the issue using `bd update <id>` with your changes\n")
 
 	return b.String()
+}
+
+// filterNonReviewComments returns comments that are not review markers
+func (m *ReviewDashboardModel) filterNonReviewComments(comments []*model.Comment) []*model.Comment {
+	result := make([]*model.Comment, 0)
+	for _, c := range comments {
+		// Skip review marker comments
+		if strings.Contains(c.Text, "[REVIEW]") || strings.Contains(c.Text, "---REVIEW---") {
+			continue
+		}
+		result = append(result, c)
+	}
+	return result
 }
 
 // findIssueByID finds an issue in the tree by ID

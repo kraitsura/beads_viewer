@@ -2108,7 +2108,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusIsError = false
 				return m, nil
 
-			case "ctrl+l":
+			case "L":
 				// Open lens selector (picker for label/epic/bead exploration)
 				m.clearAttentionOverlay()
 				m.isGraphView = false
@@ -2801,11 +2801,13 @@ func (m Model) handleLensSelectorKeys(msg tea.KeyMsg) Model {
 				m.lensDashboard = NewLensDashboardModel(selectedItem.Value, m.issues, issueMap, m.theme)
 			}
 
-			// Apply scope labels from lens selector to lens dashboard for smooth UX
+			// Apply scope labels and scope mode from lens selector to lens dashboard for smooth UX
 			if scopeLabels := m.lensSelector.ScopeLabels(); len(scopeLabels) > 0 {
 				for _, label := range scopeLabels {
 					m.lensDashboard.AddScopeLabel(label)
 				}
+				// Also apply scope match mode (union/intersection)
+				m.lensDashboard.SetScopeMode(m.lensSelector.ScopeMatchMode())
 			}
 
 			m.lensDashboard.SetSize(m.width, m.height-1)
@@ -2986,7 +2988,7 @@ func (m Model) handleLensDashboardKeys(msg tea.KeyMsg) Model {
 		} else {
 			m.lensDashboard.PageUp()
 		}
-	case "n":
+	case "]":
 		// Next section/workstream/group
 		if m.lensDashboard.IsGroupedView() {
 			m.lensDashboard.NextGroup()
@@ -2998,7 +3000,7 @@ func (m Model) handleLensDashboardKeys(msg tea.KeyMsg) Model {
 			m.lensDashboard.NextSection()
 		}
 		m.statusIsError = false
-	case "N":
+	case "[":
 		// Previous section/workstream/group
 		if m.lensDashboard.IsGroupedView() {
 			m.lensDashboard.PrevGroup()
@@ -4388,6 +4390,7 @@ func (m *Model) renderHelpOverlay() string {
 		{"h", "History view"},
 		{"a", "Actionable"},
 		{"f", "Flow matrix"},
+		{"L", "Lens dashboard"},
 		{"[", "Label dashboard"},
 		{"]", "Attention view"},
 	}

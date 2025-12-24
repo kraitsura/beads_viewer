@@ -40,8 +40,8 @@ func (s *LegacyReviewSaver) saveOne(action ReviewAction) error {
 	// Build structured review comment
 	commentText := s.formatReviewComment(action)
 
-	// bd comment add <id> "<text>" [--author <reviewer>]
-	args := []string{"comment", "add", action.IssueID, commentText}
+	// bd comment <id> "<text>" [--author <reviewer>]
+	args := []string{"comment", action.IssueID, commentText}
 	if action.Reviewer != "" {
 		args = append(args, "--author", action.Reviewer)
 	}
@@ -61,17 +61,17 @@ func (s *LegacyReviewSaver) saveOne(action ReviewAction) error {
 func (s *LegacyReviewSaver) formatReviewComment(action ReviewAction) string {
 	var sb strings.Builder
 
-	sb.WriteString("---REVIEW---\n")
-	sb.WriteString(fmt.Sprintf("Status: %s\n", action.Status))
-	sb.WriteString(fmt.Sprintf("Reviewer: %s\n", action.Reviewer))
-	sb.WriteString(fmt.Sprintf("Date: %s\n", action.Timestamp.Format(time.RFC3339)))
+	sb.WriteString("[REVIEW]\n")
+	sb.WriteString(fmt.Sprintf("status: %s\n", action.Status))
+	sb.WriteString(fmt.Sprintf("reviewer: %s\n", action.Reviewer))
+	sb.WriteString(fmt.Sprintf("date: %s\n", action.Timestamp.Format(time.RFC3339)))
 	if action.ReviewType != "" {
-		sb.WriteString(fmt.Sprintf("Type: %s\n", action.ReviewType))
+		sb.WriteString(fmt.Sprintf("type: %s\n", action.ReviewType))
 	}
 	if action.Notes != "" {
-		sb.WriteString(fmt.Sprintf("Notes: %s\n", action.Notes))
+		sb.WriteString(fmt.Sprintf("notes: %s\n", action.Notes))
 	}
-	sb.WriteString("---")
+	sb.WriteString("[/REVIEW]")
 
 	return sb.String()
 }
@@ -82,12 +82,16 @@ func (s *LegacyReviewSaver) Close() error {
 }
 
 // ReviewCommentMarker is the marker that identifies review comments
-const ReviewCommentMarker = "---REVIEW---"
+const ReviewCommentMarker = "[REVIEW]"
 
-// ParseReviewFromComment extracts review status from a legacy comment
-// Returns the status or empty string if not a review comment
+// LegacyReviewCommentMarker is the old marker for backward compatibility
+const LegacyReviewCommentMarker = "---REVIEW---"
+
+// ParseReviewFromComment extracts review status from a review comment
+// Supports both new [REVIEW] format and legacy ---REVIEW--- format
 func ParseReviewFromComment(commentText string) (status, reviewer string, reviewedAt time.Time, notes string, ok bool) {
-	if !strings.Contains(commentText, ReviewCommentMarker) {
+	// Check for either marker format
+	if !strings.Contains(commentText, ReviewCommentMarker) && !strings.Contains(commentText, LegacyReviewCommentMarker) {
 		return "", "", time.Time{}, "", false
 	}
 
@@ -95,17 +99,19 @@ func ParseReviewFromComment(commentText string) (status, reviewer string, review
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
-		if strings.HasPrefix(line, "Status:") {
-			status = strings.TrimSpace(strings.TrimPrefix(line, "Status:"))
-		} else if strings.HasPrefix(line, "Reviewer:") {
-			reviewer = strings.TrimSpace(strings.TrimPrefix(line, "Reviewer:"))
-		} else if strings.HasPrefix(line, "Date:") {
-			dateStr := strings.TrimSpace(strings.TrimPrefix(line, "Date:"))
+		// Handle both lowercase (new) and titlecase (legacy) field names
+		lineLower := strings.ToLower(line)
+		if strings.HasPrefix(lineLower, "status:") {
+			status = strings.TrimSpace(line[7:])
+		} else if strings.HasPrefix(lineLower, "reviewer:") {
+			reviewer = strings.TrimSpace(line[9:])
+		} else if strings.HasPrefix(lineLower, "date:") {
+			dateStr := strings.TrimSpace(line[5:])
 			if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
 				reviewedAt = t
 			}
-		} else if strings.HasPrefix(line, "Notes:") {
-			notes = strings.TrimSpace(strings.TrimPrefix(line, "Notes:"))
+		} else if strings.HasPrefix(lineLower, "notes:") {
+			notes = strings.TrimSpace(line[6:])
 		}
 	}
 

@@ -1243,6 +1243,8 @@ func (m *LensDashboardModel) buildEgoCenteredTree() {
 			m.cursor = len(m.upstreamNodes) // Point to ego node
 		}
 		m.selectedIssueID = m.getSelectedIDForCenteredMode()
+		// Recalculate scroll for new tree structure
+		m.ensureCenteredVisible()
 	}
 }
 

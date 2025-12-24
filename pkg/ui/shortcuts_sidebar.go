@@ -108,6 +108,7 @@ func (s *ShortcutsSidebar) allSections() []shortcutSection {
 				{"g", "Graph"},
 				{"h", "History"},
 				{"i", "Insights"},
+				{"L", "Lens dashboard"},
 				{"?", "Help"},
 				{";", "This sidebar"},
 				{"p", "Priority ↑↓"},

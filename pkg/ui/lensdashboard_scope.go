@@ -78,6 +78,15 @@ func (m *LensDashboardModel) ToggleScopeMode() {
 	}
 }
 
+// SetScopeMode sets the scope mode (union or intersection)
+func (m *LensDashboardModel) SetScopeMode(mode ScopeMode) {
+	m.scopeMode = mode
+	// Rebuild only if scope is active
+	if len(m.scopeLabels) > 0 {
+		m.rebuildWithScope()
+	}
+}
+
 // rebuildWithScope rebuilds primaryIDs based on scope and rebuilds tree
 func (m *LensDashboardModel) rebuildWithScope() {
 	// If no scope, reset to original behavior
