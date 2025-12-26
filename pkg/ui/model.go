@@ -319,6 +319,7 @@ type Model struct {
 	lensViewOrigin           bool   // True if current view (graph/insights/board) was opened from lens dashboard
 	showReviewDashboard      bool   // Show the review dashboard
 	reviewDashboardOrigin    string // Where review dashboard was opened from
+	initialBeadID            string // Bead ID to focus on at startup (for bv show <id>)
 
 	// Actionable view
 	actionableView ActionableModel
@@ -5503,6 +5504,44 @@ func (m *Model) EnableWorkspaceMode(info WorkspaceInfo) {
 // IsWorkspaceMode returns whether workspace mode is active
 func (m Model) IsWorkspaceMode() bool {
 	return m.workspaceMode
+}
+
+// SetInitialBead configures the model to open lens dashboard for a specific bead on startup
+func (m *Model) SetInitialBead(beadID string) {
+	m.initialBeadID = beadID
+	// Pre-initialize the lens dashboard for the bead
+	if beadID != "" && len(m.issues) > 0 {
+		m.openBeadLensInternal(beadID)
+	}
+}
+
+// openBeadLensInternal opens the lens dashboard for a specific bead ID
+func (m *Model) openBeadLensInternal(beadID string) {
+	// Build issue map if needed
+	issueMap := m.issueMap
+	if issueMap == nil {
+		issueMap = make(map[string]*model.Issue, len(m.issues))
+		for i := range m.issues {
+			issueMap[m.issues[i].ID] = &m.issues[i]
+		}
+		m.issueMap = issueMap
+	}
+
+	// Check if bead exists
+	issue, exists := issueMap[beadID]
+	if !exists {
+		m.statusMsg = fmt.Sprintf("Bead not found: %s", beadID)
+		m.statusIsError = true
+		return
+	}
+
+	// Open lens dashboard for this bead
+	m.showLensDashboard = true
+	m.focused = focusLensDashboard
+	m.lensDashboard = NewBeadLensModel(beadID, m.issues, issueMap, m.theme)
+	m.lensDashboard.SetSize(m.width, m.height-1)
+	m.statusMsg = fmt.Sprintf("Lens: %s • j/k nav • w workstreams • d depth • c centered", issue.Title)
+	m.statusIsError = false
 }
 
 // enterHistoryView loads correlation data and shows the history view

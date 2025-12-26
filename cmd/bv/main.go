@@ -181,6 +181,16 @@ func main() {
 	debugRender := flag.String("debug-render", "", "Render a view and output to file (views: insights, board)")
 	debugWidth := flag.Int("debug-width", 180, "Width for debug render")
 	debugHeight := flag.Int("debug-height", 50, "Height for debug render")
+
+	// Check for 'show' subcommand before parsing flags
+	// Usage: bv show <bead-id>
+	var showBeadID string
+	if len(os.Args) >= 3 && os.Args[1] == "show" {
+		showBeadID = os.Args[2]
+		// Remove 'show <id>' from args so flag.Parse() works correctly
+		os.Args = append([]string{os.Args[0]}, os.Args[3:]...)
+	}
+
 	flag.Parse()
 
 	// Ensure static export flags are retained even when build tags strip features in some environments.
@@ -258,6 +268,7 @@ func main() {
 
 	if *help {
 		fmt.Println("Usage: bv [options]")
+		fmt.Println("       bv show <bead-id>   Open lens dashboard for specific bead")
 		fmt.Println("\nA TUI viewer for beads issue tracker.")
 		flag.PrintDefaults()
 		os.Exit(0)
@@ -4327,6 +4338,11 @@ func main() {
 			TotalIssues:  workspaceInfo.TotalIssues,
 			RepoPrefixes: workspaceInfo.RepoPrefixes,
 		})
+	}
+
+	// Open lens dashboard for specific bead if 'bv show <id>' was invoked
+	if showBeadID != "" {
+		m.SetInitialBead(showBeadID)
 	}
 
 	// Debug render mode - output a view to file and exit
